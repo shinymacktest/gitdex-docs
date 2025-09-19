@@ -1,0 +1,98 @@
+---
+title: "Backend Core Utilities & WebSockets"
+description: "Explore the foundational backend utilities, JWT token generation, and the WebSocket setup for real-time communication."
+---
+<TOC />
+
+# Backend Core Utilities & WebSockets
+
+This section details the core utility functions and the WebSocket server setup that enables real-time features in the application. These components are essential for user authentication, session management, and instant messaging capabilities.
+
+## WebSocket Server Initialization
+
+The application utilizes `socket.io` for real-time, bidirectional communication. The `socket.js` file sets up the Socket.IO server, integrates it with Express, and manages online user tracking.
+
+```javascript
+import { Server } from "socket.io";
+import http from "http";
+import express from "express";
+
+const app = express();
+const server = http.createServer(app);
+const io = new Server(server, {
+    cors: {
+        origin: ["http://localhost:5173"] // Configured for local development frontend
+    }
+});
+
+// ... (connection handling logic)
+export { io, app, server };
+```
+[Source: backend/src/lib/socket.js](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/lib/socket.js)
+
+### Online User Management
+The `userSocketMap` object is central to tracking which users are currently online. When a user connects, their `userId` is mapped to their `socket.id`. Upon disconnection, the entry is removed, and all connected clients are notified of the updated online user list.
+
+```javascript
+// used to store online users
+const userSocketMap = {}; //{userId : socketId}
+
+io.on("connection", (socket) => {
+    // ...
+    const userId = socket.handshake.query.userId;
+    if(userId) userSocketMap[userId] = socket.id;
+
+    io.emit("getOnlineUsers", Object.keys(userSocketMap)); // Notify clients
+
+    socket.on("disconnect", ()=>{
+        delete userSocketMap[userId];
+        io.emit("getOnlineUsers", Object.keys(userSocketMap)); // Update clients
+    });
+});
+
+export function getReceiverSocketId(userId) {
+    return userSocketMap[userId];
+}
+```
+[Source: backend/src/lib/socket.js](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/lib/socket.js)
+
+The `getReceiverSocketId` function allows the backend to retrieve the `socket.id` of a specific user, which is crucial for sending targeted messages or notifications.
+
+<!-- Fixed Mermaid syntax -->
+````mermaid
+graph TD
+    A[Client Connects] --> B{Socket.IO Connection};
+    B -- userId from handshake --> C[Store: userSocketMap[userId] = socket.id];
+    C --> D[Emit "getOnlineUsers" to all clients];
+    D --> E[Client Disconnects];
+    E --> F[Delete userSocketMap[userId]];
+    F --> G[Emit "getOnlineUsers" to all clients];
+    style A fill:#BCEE68
+    style E fill:#FF6347
+```
+
+## JSON Web Token (JWT) Generation
+
+The `utils.js` file provides the `generateToken` function, responsible for creating and setting a JWT as an HTTP-only cookie. This token is used for maintaining user sessions and authentication.
+
+```javascript
+import jwt from 'jsonwebtoken';
+
+export const generateToken = (userId, res) => {
+    const token = jwt.sign({userId}, process.env.JWT_SECRET,
+        {expiresIn: "7d"});
+
+    res.cookie("jwt", token, {
+        maxAge: 7 * 24 * 60 * 60 * 1000,
+        httpOnly: true, // Prevents client-side JS access
+        sameSite: "strict", // CSRF protection
+        secure: process.env.NODE_ENV !== "development", // Use HTTPS in production
+    });
+    return token;
+};
+```
+[Source: backend/src/lib/utils.js](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/lib/utils.js)
+
+The cookie configuration enhances security by making the token inaccessible to client-side JavaScript (`httpOnly`), preventing Cross-Site Request Forgery (CSRF) attacks (`sameSite: "strict"`), and ensuring the cookie is only sent over secure HTTPS connections in production environments (`secure`).
+
+Next: [Backend Authentication & Middleware](/docs/1.2_backend_auth_models_api)

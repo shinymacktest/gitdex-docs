@@ -1,0 +1,172 @@
+---
+title: "User Interactions and Navigation"
+description: "Exploration of user management (friends) and global navigation within the application."
+---
+# User Interactions and Navigation
+
+<TOC />
+
+This section details components that facilitate global navigation and user relationship management, such as friend requests and friend lists, within the ShinyChat application.
+
+## Navbar
+
+The `Navbar` component serves as the primary navigation bar fixed at the top of the application. It provides access to various global features and user-specific actions.
+
+### Key Features
+-   **Branding & Home Link**: Displays the "ShinyChat" logo, linking back to the home page.
+-   **Friends Management**: A button that, when clicked, toggles the visibility of the `FriendsBox` component, enabling users to manage their friends and requests.
+-   **Settings Link**: Navigates to the application's settings page.
+-   **User-Specific Actions**:
+    -   **Profile Link**: If a user is authenticated (`authUser` exists), a link to their profile page is displayed.
+    -   **Logout Button**: Allows an authenticated user to log out of the application.
+-   **Responsive Design**: The `sm:inline` classes indicate elements that are hidden on small screens but visible on larger ones, providing a cleaner mobile interface.
+
+```jsx
+// Excerpt from Navbar.jsx
+import { Link } from "react-router-dom";
+import { useAuthStore } from "../store/useAuthStore";
+import { LogOut, MessageSquare, Settings, User, Users } from "lucide-react";
+import { useChatStore } from "../store/useChatStore";
+
+const Navbar = () => {
+  const { logout, authUser } = useAuthStore();
+  const { toggleFriendsBox } = useChatStore(); 
+
+  return (
+    <header className="...">
+      <div className="container mx-auto px-4 h-16">
+        <div className="flex items-center justify-between h-full">
+          <div className="flex items-center gap-8">
+            <Link to="/" className="...">
+              <MessageSquare className="size-5 text-primary"></MessageSquare>
+              <h1 className="text-lg font-bold">ShinyChat</h1>
+            </Link>
+          </div>
+          <div className="flex items-center gap-4">
+            <button className="btn btn-sm gap-2" onClick={toggleFriendsBox}>
+              <Users className="size-5" />
+              <span className="hidden sm:inline">Friends</span>
+            </button>
+            <Link to={"/settings"} className={`btn btn-sm gap-2 transition-colors`}>
+            <Settings className="size-4"/>
+            <span className="hidden sm:inline">Settings</span>
+            </Link>
+            {authUser && (
+              <>
+                <Link to={"/profile"} className={`btn btn-sm gap-2`}>
+                  <User className="size-5" />
+                  <span className="hidden sm:inline">Profile</span>
+                </Link>
+                <button className="btn btn-sm flex gap-2 items-center" onClick={logout}>
+                  <LogOut className="size-5" />
+                  <span className="hidden sm:inline">Logout</span>
+                </button>
+              </>
+            )}
+          </div>
+        </div>
+      </div>
+    </header>
+  );
+};
+
+export default Navbar;
+```
+[Source: `frontend/src/components/Navbar.jsx`](https://github.com/shinymack/Chat-App-MERN/blob/main/frontend/src/components/Navbar.jsx)
+
+### Navigation Flow
+The Navbar provides clear pathways to different sections and features of the application.
+
+````mermaid
+graph TD
+    A[Navbar] --> B[Home (ShinyChat)]
+    A --> C[Friends (toggleFriendsBox)]
+    A --> D[Settings]
+    A -- "If Authenticated" --> E[Profile]
+    A -- "If Authenticated" --> F[Logout]
+```
+
+## FriendsBox
+
+The `FriendsBox` component is a modal dialog that provides comprehensive functionality for managing a user's friend relationships within the application. It allows users to view current friends, pending requests, sent requests, and send new friend requests.
+
+### Key Features
+-   **Tabbed Interface**: Organizes friend management into three tabs: "Friends", "Pending" (incoming requests), and "Sent" (outgoing requests).
+-   **Add Friend**: A form to send friend requests by entering a username or email.
+-   **Request Management**:
+    -   For pending requests: buttons to `acceptFriendRequest` or `rejectFriendRequest`.
+    -   For current friends: a button to `removeFriend`.
+-   **Dynamic Content**: The content displayed changes based on the `activeTab` state, showing lists of users, pending requests, or sent requests fetched from `useChatStore`.
+-   **Modal Overlay**: Presented as a fixed overlay, ensuring focus on friend management while open.
+
+### State Management and Actions
+The component heavily relies on the `useChatStore` for fetching and manipulating friend-related data.
+
+```jsx
+// Excerpt from FriendsBox.jsx
+import { useEffect, useState } from 'react';
+import { useChatStore } from '../store/useChatStore';
+import { X, UserPlus, Check, Trash2 } from 'lucide-react';
+
+const FriendsBox = () => {
+    const { 
+        toggleFriendsBox, 
+        getFriends, users,
+        getPendingRequests, pendingRequests,
+        getSentRequests, sentRequests,
+        sendFriendRequest, acceptFriendRequest, rejectFriendRequest, removeFriend
+    } = useChatStore();
+
+    const [activeTab, setActiveTab] = useState('friends');
+    const [identifier, setIdentifier] = useState('');
+
+    useEffect(() => {
+        getFriends();
+        getPendingRequests();
+        getSentRequests();
+    }, [getFriends, getPendingRequests, getSentRequests]);
+
+    // ... handleAddFriend, renderContent functions
+
+    return (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center">
+            <div className="bg-base-100 rounded-lg w-full max-w-md p-6 relative flex flex-col gap-4">
+                <button onClick={toggleFriendsBox} className="btn btn-sm btn-circle btn-ghost absolute top-2 right-2"><X /></button>
+                <h2 className="text-xl font-bold">Manage Friends</h2>
+                <form onSubmit={handleAddFriend} className="flex gap-2">
+                    {/* ... input for identifier and submit button */}
+                </form>
+                <div role="tablist" className="tabs tabs-boxed">
+                    <a role="tab" className={`tab ${activeTab === 'friends' ? 'tab-active' : ''}`} onClick={() => setActiveTab('friends')}>Friends ({users.length})</a>
+                    <a role="tab" className={`tab ${activeTab === 'pending' ? 'tab-active' : ''}`} onClick={() => setActiveTab('pending')}>Pending ({pendingRequests.length})</a>
+                    <a role="tab" className={`tab ${activeTab === 'sent' ? 'tab-active' : ''}`} onClick={() => setActiveTab('sent')}>Sent ({sentRequests.length})</a>
+                </div>
+                <div className="overflow-y-auto max-h-60 pr-2">
+                    {renderContent()}
+                </div>
+            </div>
+        </div>
+    );
+};
+
+export default FriendsBox;
+```
+[Source: `frontend/src/components/FriendsBox.jsx`](https://github.com/shinymack/Chat-App-MERN/blob/main/frontend/src/components/FriendsBox.jsx)
+
+### Friends Management Flow
+The `FriendsBox` orchestrates several actions related to friend management, driven by its internal tab state and interactions with the chat store.
+
+````mermaid
+graph TD
+    A[FriendsBox] --> B{activeTab State}
+    B -- "friends" --> C[Display Current Friends]
+    B -- "pending" --> D[Display Pending Requests]
+    B -- "sent" --> E[Display Sent Requests]
+
+    C -- "removeFriend(ID)" --> F[useChatStore: removeFriend]
+    D -- "acceptFriendRequest(ID)" --> G[useChatStore: acceptFriendRequest]
+    D -- "rejectFriendRequest(ID)" --> H[useChatStore: rejectFriendRequest]
+    A -- "Add Friend Form" --> I[useChatStore: sendFriendRequest]
+```
+
+GLOBAL_TOC_PLACEHOLDER: 2. Frontend > 2.1. Chat Interface, 2. Frontend > 2.2. User Interactions and Navigation

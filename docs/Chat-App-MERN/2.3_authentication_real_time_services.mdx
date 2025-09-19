@@ -1,0 +1,380 @@
+---
+title: "Authentication & Real-time Services"
+description: "Implementation of user authentication strategies, authorization middleware, WebSocket communication, and media upload services."
+sidebar_position: 23
+---
+
+# Authentication & Real-time Services
+
+Welcome to the **Authentication & Real-time Services** section of the GitDex documentation. This document provides a deep dive into the backend components responsible for user authentication, access control, real-time communication, and media management within the application. We'll explore the architecture and implementation details of user login strategies, secure route protection, live data exchange via WebSockets, and external media storage integration.
+
+<TOC />
+
+## 1. User Authentication with Passport.js (Google OAuth)
+
+Authentication is a critical aspect of any modern application, ensuring that only legitimate users can access protected resources. This application leverages [Passport.js](http://www.passportjs.org/) for flexible authentication, specifically implementing Google OAuth 2.0 for user sign-in.
+
+### 1.1. Purpose and Design
+
+The primary goal of using Google OAuth is to provide a seamless, secure, and widely adopted authentication method, offloading user credential management to Google. This enhances security by not storing sensitive user passwords directly and improves user experience by allowing quick sign-in with existing Google accounts.
+
+### 1.2. Implementation Details: `passport.config.js`
+
+The [`backend/src/lib/passport.config.js`](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/lib/passport.config.js) file is responsible for configuring the Passport.js strategies.
+
+#### Key Components:
+
+*   **GoogleStrategy**: Utilized for OAuth 2.0 authentication with Google. It requires a `clientID`, `clientSecret`, and `callbackURL`, all loaded from environment variables for security and flexibility.
+*   **User Model Integration**: After successful authentication with Google, the callback function interacts with the `User` model (presumably `backend/src/models/user.model.js`) to find or create a user in the application's database.
+*   **User Provisioning Logic**:
+    *   Checks if a user with the `googleId` already exists. If so, the existing user is returned.
+    *   If not, a new user is created. A unique `username` is generated based on `displayName` and includes a timestamp suffix if a conflict is detected.
+    *   Crucially, it validates the presence of an email from Google and prevents creating a new Google-linked account if an account with the same email already exists via a different provider.
+*   **Serialization and Deserialization**: Passport.js uses these functions to manage user sessions.
+    *   `serializeUser` stores a minimal user identifier (the MongoDB `_id`) in the session.
+    *   `deserializeUser` retrieves the full user object from the database using the stored ID, making it available as `req.user` in subsequent requests.
+
+#### Code Snippet: Google Strategy Configuration
+
+```javascript
+// backend/src/lib/passport.config.js
+import passport from 'passport';
+import { Strategy as GoogleStrategy } from 'passport-google-oauth20';
+import User from '../models/user.model.js';
+import dotenv from 'dotenv';
+
+dotenv.config();
+
+export const configurePassport = () => {
+    passport.use(new GoogleStrategy({
+        clientID: process.env.GOOGLE_CLIENT_ID,
+        clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+        callbackURL: process.env.GOOGLE_CALLBACK_URL,
+        scope: ['profile', 'email']
+    },
+    async (accessToken, refreshToken, profile, done) => {
+        try {
+            let user = await User.findOne({ googleId: profile.id });
+
+            if (user) {
+                return done(null, user);
+            } else {
+                let username = profile.displayName.replace(/\s+/g, '').toLowerCase() || `user${Date.now()}`;
+                const existingUserByUsername = await User.findOne({ username });
+                if (existingUserByUsername) {
+                    username = `${username}${Date.now().toString().slice(-4)}`;
+                }
+                if (username.length > 20) username = username.substring(0,20);
+
+                const newUser = new User({
+                    googleId: profile.id,
+                    email: profile.emails && profile.emails[0] ? profile.emails[0].value : null,
+                    username: username,
+                    authProvider: 'google',
+                });
+
+                if (!newUser.email) {
+                    return done(new Error("Email not provided by Google. Cannot create account."), null);
+                }
+
+                const existingUserByEmail = await User.findOne({ email: newUser.email });
+                if (existingUserByEmail && existingUserByEmail.authProvider !== 'google') {
+                    return done(null, false, { message: `An account with email ${newUser.email} already exists. Please sign in using your original method.` });
+                }
+
+                await newUser.save();
+                return done(null, newUser);
+            }
+        } catch (error) {
+            return done(error, null);
+        }
+    }));
+    // ... serialization/deserialization logic
+};
+```
+[Full file `passport.config.js` on GitHub](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/lib/passport.config.js#L1-L71)
+
+#### Interaction Diagram: Google OAuth Flow
+
+
+
+
+
+```mermaid
+graph TD
+    User[Client User] --> A{Initiate Google Login};
+    A --> B(Redirect to Google OAuth);
+    B --> C(Google Authenticates User);
+    C -- Authorization Grant --> D(Callback URL in Your App);
+    D --> E[Passport.js GoogleStrategy Callback];
+    E -- Find or Create User --> F[Database (User Collection)];
+    F -- User Data --> E;
+    E -- Success / Failure --> G(Establish Session / Handle Error);
+    G --> User;
+```
+
+
+
+### 1.3. Best Practices
+
+*   **Environment Variables**: All sensitive credentials (`clientID`, `clientSecret`, `callbackURL`, `JWT_SECRET`) are stored in environment variables, preventing them from being hardcoded and exposed.
+*   **Error Handling**: Robust error handling is implemented within the Passport callback to manage scenarios like missing email, duplicate accounts, or database errors.
+*   **Unique Usernames**: The application dynamically generates and ensures the uniqueness of usernames derived from Google profiles, providing a consistent user identity.
+
+## 2. Authorization Middleware
+
+Authorization determines if an authenticated user has the necessary permissions to perform an action or access a resource. This application implements a token-based authorization mechanism using JSON Web Tokens (JWTs).
+
+### 2.1. Purpose and Design
+
+The `protectRoute` middleware ensures that only authenticated and authorized users can access specific API endpoints. It works by verifying the presence and validity of a JWT provided in the request, typically stored as an HTTP-only cookie. This design centralizes access control logic, preventing unauthorized access to sensitive routes.
+
+### 2.2. Implementation Details: `auth.middleware.js`
+
+The [`backend/src/middleware/auth.middleware.js`](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/middleware/auth.middleware.js) file contains the `protectRoute` middleware.
+
+#### Key Components:
+
+*   **JWT Retrieval**: The middleware attempts to read the `jwt` token from the request cookies.
+*   **Token Validation**: It verifies the token's authenticity using `jwt.verify()` with a secret key (`process.env.JWT_SECRET`).
+*   **User Lookup**: If the token is valid, the decoded `userId` is used to fetch the corresponding user from the database, excluding the password field for security.
+*   **Request Augmentation**: The fetched `user` object is then attached to the `req` object (`req.user = user`), making user information easily accessible in subsequent route handlers.
+*   **Error Responses**: Specific HTTP status codes and messages are returned for different failure scenarios (no token, invalid token, user not found).
+
+#### Code Snippet: `protectRoute` Middleware
+
+```javascript
+// backend/src/middleware/auth.middleware.js
+import jwt from "jsonwebtoken"
+import User from "../models/user.model.js"
+
+export const protectRoute = async (req, res, next) => {
+    try {
+        const token = req.cookies.jwt;
+        if(!token){
+            return res.status(401).json({message: "Unauthorized - No Token Provided"});
+        }
+
+        const decoded = jwt.verify(token, process.env.JWT_SECRET)
+
+        if(!decoded) {
+            return res.status(401).json({message: "Unauthorized - Invalid Token"});
+        }
+        const user = await User.findById(decoded.userId).select("-password");
+
+        if(!user) {
+            return res.status(404).json({message: "User not found"});
+        }
+        req.user = user;
+
+        next();
+    } catch (error) {
+        console.log("Error in protectRoute middleware", error.message);
+        res.status(500).json({message: "Internal Server Error"});
+    }
+};
+```
+[Full file `auth.middleware.js` on GitHub](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/middleware/auth.middleware.js#L1-L30)
+
+#### Flow Diagram: `protectRoute` Authorization
+
+
+
+
+
+```mermaid
+flowchart TD
+    A[Incoming Request to Protected Route] --> B{Token in `req.cookies.jwt`?};
+    B -- No --> C[401 Unauthorized - No Token];
+    B -- Yes --> D{Verify JWT with `JWT_SECRET`};
+    D -- Invalid --> E[401 Unauthorized - Invalid Token];
+    D -- Valid --> F{Find User by `decoded.userId`};
+    F -- Not Found --> G[404 User Not Found];
+    F -- Found --> H[Attach User to `req.user`];
+    H --> I[Call `next()` - Proceed to Route Handler];
+    C & E & G --> J[End Request];
+```
+
+
+
+### 2.3. Best Practices
+
+*   **HTTP-Only Cookies**: JWTs are stored in HTTP-only cookies, which makes them inaccessible to client-side JavaScript, mitigating XSS (Cross-Site Scripting) attacks.
+*   **Environment Variables**: The `JWT_SECRET` is kept in environment variables, which is crucial for the security of token verification.
+*   **Clear Error Messages**: The middleware provides specific error messages that help clients understand the reason for authorization failure, aiding debugging and improving API usability.
+
+## 3. Real-time Services with Socket.IO
+
+Real-time communication is essential for applications like chat platforms, enabling instant message delivery and live user status updates. This application integrates [Socket.IO](https://socket.io/) to facilitate such interactions.
+
+### 3.1. Purpose and Design
+
+Socket.IO is chosen for its robust WebSocket capabilities, including automatic fallback to HTTP long-polling, connection management, and broadcasting features. The design centralizes real-time logic, allowing the server to maintain a map of online users and broadcast events to specific clients or all connected clients.
+
+### 3.2. Implementation Details: `socket.js`
+
+The [`backend/src/lib/socket.js`](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/lib/socket.js) file sets up and manages the Socket.IO server.
+
+#### Key Components:
+
+*   **HTTP Server Integration**: Socket.IO is initialized on top of a standard Node.js HTTP server, which is created using `http.createServer(app)`. This allows the same server instance to handle both REST API calls (via `express`) and WebSocket connections.
+*   **CORS Configuration**: The `cors` option is configured to allow connections only from the specified frontend origin (`http://localhost:5173`), preventing unauthorized cross-origin WebSocket connections.
+*   **`userSocketMap`**: An object `{userId: socketId}` is maintained to store the `socket.id` for each connected `userId`. This map is crucial for sending messages or events to specific online users.
+*   **`getReceiverSocketId`**: A utility function to retrieve a specific user's `socketId` from the `userSocketMap`, enabling targeted messaging.
+*   **Connection and Disconnection Handlers**:
+    *   On `io.on("connection")`, when a user connects, their `userId` (passed via `socket.handshake.query.userId`) is stored in `userSocketMap`. The server then broadcasts an updated list of online users (`getOnlineUsers`) to all connected clients.
+    *   On `socket.on("disconnect")`, when a user disconnects, their entry is removed from `userSocketMap`, and the `getOnlineUsers` list is broadcasted again.
+
+#### Code Snippet: Socket.IO Setup and Connection Handling
+
+```javascript
+// backend/src/lib/socket.js
+import { Server } from "socket.io";
+import http from "http";
+import express from "express";
+
+const app = express();
+const server = http.createServer(app);
+
+const io = new Server(server, {
+    cors: {
+        origin: ["http://localhost:5173"]
+    }
+})
+
+export function getReceiverSocketId(userId) {
+    return userSocketMap[userId];
+}
+
+// used to store online users
+const userSocketMap = {}; //{userId : socketId}
+
+io.on("connection", (socket) => {
+    console.log("A user connected", socket.id);
+
+    const userId = socket.handshake.query.userId;
+    if(userId) userSocketMap[userId] = socket.id;
+
+    io.emit("getOnlineUsers", Object.keys(userSocketMap));
+
+    socket.on("disconnect", ()=>{
+        console.log("A user disconnected", socket.id);
+        delete userSocketMap[userId];
+        io.emit("getOnlineUsers", Object.keys(userSocketMap));
+    })
+})
+
+export { io, app, server };
+```
+[Full file `socket.js` on GitHub](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/lib/socket.js#L1-L36)
+
+#### Sequence Diagram: Socket.IO Connection/Disconnection
+
+
+
+
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Socket.IO Server
+    participant UMap as User Socket Map
+
+    C->>+S: Connect (with userId query)
+    S->>UMap: Store userId:socketId
+    S-->>C: Emit "getOnlineUsers" (online user IDs)
+    Note over S,C: Real-time communication occurs
+    C->>-S: Disconnect
+    S->>UMap: Delete userId:socketId
+    S-->>C: Emit "getOnlineUsers" (updated list)
+```
+
+
+
+### 3.3. Best Practices
+
+*   **Scalability**: For larger applications, `userSocketMap` could be backed by a distributed store like Redis to support multiple Socket.IO server instances.
+*   **Authentication for Sockets**: The `userId` is passed via `socket.handshake.query`. For production, it's recommended to integrate a proper authentication mechanism (e.g., JWT in a header or query parameter) for WebSocket connections to prevent unauthorized access.
+*   **CORS**: Carefully configure CORS to restrict access to trusted origins only, enhancing security.
+
+## 4. Media Upload Services with Cloudinary
+
+Efficient and scalable media management is crucial for applications that involve user-generated content, such as profile pictures or shared images. This application integrates [Cloudinary](https://cloudinary.com/) for cloud-based media storage and delivery.
+
+### 4.1. Purpose and Design
+
+Cloudinary provides a comprehensive solution for image and video management, including uploading, storing, transforming, and delivering media. By delegating media handling to Cloudinary, the application benefits from:
+
+*   **Scalability**: Cloudinary automatically scales storage and delivery infrastructure.
+*   **Performance**: Content Delivery Network (CDN) integration ensures fast delivery worldwide.
+*   **Rich Features**: Image and video manipulation (resizing, cropping, filters) can be done on the fly.
+*   **Reduced Backend Load**: The application server is freed from media processing tasks.
+
+### 4.2. Implementation Details: `cloudinary.js`
+
+The [`backend/src/lib/cloudinary.js`](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/lib/cloudinary.js) file initializes the Cloudinary SDK.
+
+#### Key Components:
+
+*   **SDK Import**: Imports the `v2` version of the Cloudinary SDK.
+*   **Environment Variables**: Uses `dotenv` to load API credentials (`CLOUDINARY_CLOUD_NAME`, `CLOUDINARY_API_KEY`, `CLOUDINARY_API_SECRET`) from the environment.
+*   **Configuration**: The `cloudinary.config()` method is called to set up the necessary credentials, allowing the application to authenticate with the Cloudinary service.
+
+#### Code Snippet: Cloudinary Configuration
+
+```javascript
+// backend/src/lib/cloudinary.js
+import {v2 as cloudinary} from "cloudinary"
+import { config } from 'dotenv'
+
+config(); // Load environment variables
+
+cloudinary.config(
+    {cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+    api_key: process.env.CLOUDINARY_API_KEY,
+    api_secret: process.env.CLOUDINARY_API_SECRET,}
+);
+
+export default cloudinary;
+```
+[Full file `cloudinary.js` on GitHub](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/lib/cloudinary.js#L1-L12)
+
+#### Architecture Diagram: Cloudinary Integration
+
+
+
+
+
+```mermaid
+graph TD
+    App[Backend Application] --> LoadEnv[Load .env variables];
+    LoadEnv --> ConfigureCloudinary[Cloudinary.config() using ENV];
+    ConfigureCloudinary --> CloudinarySDK[Cloudinary SDK Instance];
+    App --> UploadAPI(Upload API endpoint);
+    UploadAPI --> CloudinarySDK;
+    CloudinarySDK --> CloudinaryService[Cloudinary Cloud Service];
+    CloudinaryService --> MediaStorage[Secure Media Storage];
+    MediaStorage --> CDN[Global CDN for Delivery];
+```
+
+
+
+### 4.3. Best Practices
+
+*   **Environment Variables**: All Cloudinary credentials must be stored as environment variables and never hardcoded into the application.
+*   **Client-Side Upload (Optional)**: For optimal performance and to reduce backend load, consider using Cloudinary's direct upload from the client-side, using signed upload presets. However, the current setup implies server-side upload.
+*   **Image Optimization**: Leverage Cloudinary's transformation URLs to optimize image sizes and formats for different devices and contexts, reducing bandwidth and improving load times.
+
+## 5. Key Integration Points and Insights
+
+*   **Authentication Flow**: Passport.js with Google OAuth provides a user ID which is then used to create/identify a user in the application's database. This user ID is crucial for establishing real-time connections and creating JWTs.
+*   **Authorization Chain**: Upon successful authentication (e.g., after Google OAuth, a JWT is issued), the `protectRoute` middleware uses this JWT to authorize subsequent requests, ensuring that only authenticated users can perform actions like sending messages or accessing user data.
+*   **Real-time User Mapping**: The `userId` obtained from authentication is directly used in `socket.js` to map users to their active WebSocket connections, enabling features like "online users" and direct messaging.
+*   **Media and User Profiles**: Cloudinary facilitates the storage of user-related media, such as profile pictures, linking them back to user accounts stored in the database.
+*   **Security Best Practices**: Consistent use of environment variables for sensitive data (API keys, secrets), HTTP-only cookies for JWTs, and secure connection protocols are vital across all services.
+
+This robust set of services ensures a secure, scalable, and highly interactive user experience, laying the groundwork for real-time features and content management.
+
+---
+
+Next: [Frontend Application](./3_frontend_application.mdx)

@@ -1,0 +1,396 @@
+---
+title: "Getting Started"
+description: "Instructions for setting up and running both the backend and frontend components of the application locally."
+sidebar_position: 11
+---
+
+# Getting Started
+
+<TOC />
+
+This guide provides comprehensive instructions for setting up and running the full-stack application locally. It covers both the backend (Node.js/Express) and frontend (React/Vite) components, detailing their dependencies, configuration, and execution commands. Understanding these steps is crucial for local development, testing, and contributing to the project.
+
+## 1. System Overview
+
+This application is built as a MERN (MongoDB, Express, React, Node.js) stack, leveraging a robust backend API for data management and real-time communication, and a dynamic frontend for user interaction.
+
+### 1.1 Core Components
+
+*   **Backend**: Handles API requests, authentication, database interactions, and real-time events.
+*   **Frontend**: Provides the user interface, consumes backend APIs, and establishes real-time connections.
+
+### 1.2 Technologies Used
+
+The following table summarizes the primary technologies used across the application:
+
+| Component | Technology             | Purpose                                                |
+| :-------- | :--------------------- | :----------------------------------------------------- |
+| Backend   | Node.js                | Server-side runtime environment                        |
+|           | Express.js             | Web application framework for APIs                     |
+|           | MongoDB                | NoSQL database for data storage                        |
+|           | Mongoose               | ODM for MongoDB                                        |
+|           | Socket.IO              | Real-time bidirectional event-based communication      |
+|           | Passport.js            | Authentication middleware (local, Google OAuth 2.0)    |
+|           | JWT, bcryptjs          | Token-based authentication, password hashing           |
+| Frontend  | React.js               | JavaScript library for building user interfaces        |
+|           | Vite                   | Next-generation frontend tooling (build tool, dev server) |
+|           | React Router DOM       | Declarative routing for React                          |
+|           | Axios                  | Promise-based HTTP client                              |
+|           | Socket.IO Client       | Client-side library for WebSocket communication        |
+|           | Zustand                | Small, fast, and scalable state-management solution    |
+| Styling   | Tailwind CSS, DaisyUI | Utility-first CSS framework and component library      |
+
+## 2. Backend Setup
+
+The backend serves as the core API and real-time communication hub. It manages user authentication, messaging, friend management, and database interactions.
+
+### 2.1 Dependencies
+
+The backend relies on several key Node.js packages to provide its functionality. These are defined in the [`backend/package.json`](https://github.com/user/repo/blob/main/backend/package.json) file.
+
+**Key Dependencies (`dependencies`):**
+
+*   `express`: The web framework for creating RESTful APIs.
+*   `mongoose`: An Object Data Modeling (ODM) library for MongoDB, simplifying database interactions.
+*   `socket.io`: Enables real-time, bidirectional, event-based communication, essential for features like live chat.
+*   `bcryptjs`: Used for hashing passwords, ensuring secure storage of user credentials.
+*   `jsonwebtoken`: For creating and verifying JSON Web Tokens, used in token-based authentication.
+*   `cookie-parser`, `express-session`, `passport`, `passport-google-oauth20`: Essential for implementing robust authentication mechanisms, including session management and Google OAuth.
+*   `cors`: Middleware to enable Cross-Origin Resource Sharing, allowing the frontend (on a different origin) to communicate with the backend.
+*   `dotenv`: Loads environment variables from a `.env` file, keeping sensitive configuration out of source control.
+*   `cloudinary`: For cloud-based image and video management, likely used for user avatars or media sharing.
+
+**Development Dependencies (`devDependencies`):**
+
+*   `nodemon`: Automatically restarts the Node.js server when file changes are detected, boosting development efficiency.
+
+### 2.2 Installation
+
+To set up the backend, navigate to the `backend` directory in your terminal and install the dependencies:
+
+```bash
+cd backend
+npm install
+```
+
+### 2.3 Environment Variables
+
+The backend requires several environment variables for configuration, security, and external service integration. Create a `.env` file in the `backend` directory and populate it with the following:
+
+```ini title=".env example"
+PORT=5000
+MONGO_URI=mongodb://localhost:27017/chat_app
+JWT_SECRET=your_jwt_secret_key
+SESSION_SECRET=your_session_secret_key
+GOOGLE_CLIENT_ID=your_google_client_id
+GOOGLE_CLIENT_SECRET=your_google_client_secret
+CLOUDINARY_CLOUD_NAME=your_cloudinary_cloud_name
+CLOUDINARY_API_KEY=your_cloudinary_api_key
+CLOUDINARY_API_SECRET=your_cloudinary_api_secret
+```
+
+*   **`PORT`**: The port on which the Express server will listen.
+*   **`MONGO_URI`**: The connection string for your MongoDB database.
+*   **`JWT_SECRET`**: A strong, secret key used to sign and verify JWTs.
+*   **`SESSION_SECRET`**: A strong, secret key used to sign the session ID cookie, crucial for `express-session`.
+*   **`GOOGLE_CLIENT_ID`**, **`GOOGLE_CLIENT_SECRET`**: Credentials for Google OAuth 2.0 integration.
+*   **`CLOUDINARY_*`**: Credentials for integrating with Cloudinary for media storage.
+
+**WHY this design?** Using environment variables is a best practice for security and flexibility. It keeps sensitive data out of the codebase and allows easy configuration changes across different deployment environments (development, staging, production) without modifying code.
+
+### 2.4 Running the Backend
+
+Once dependencies are installed and `.env` is configured, you can start the backend server:
+
+*   **Development Mode (with `nodemon`):**
+    ```bash
+    npm run dev
+    ```
+    This command, defined in [`backend/package.json`](https://github.com/user/repo/blob/main/backend/package.json#L5), uses `nodemon` to watch for file changes and automatically restart the server, streamlining the development process.
+*   **Production Mode (standard Node.js execution):**
+    ```bash
+    npm start
+    ```
+    This command, also in [`backend/package.json`](https://github.com/user/repo/blob/main/backend/package.json#L6), runs the server directly using `node`. This is typically used in production environments where `nodemon` is not needed.
+
+You should see a message in the console indicating that the server is running on the specified port (e.g., "server is running on PORT: 5000") and that the database is connected.
+
+### 2.5 Backend Core Initialization
+
+The [`backend/src/index.js`](https://github.com/user/repo/blob/main/backend/src/index.js) file is the entry point for the backend. It initializes the Express application, configures middleware, sets up routes, and starts the server.
+
+```javascript title="backend/src/index.js (snippet)"
+import express from "express";
+import cors from "cors";
+import authRoutes from "./routes/auth.route.js";
+import messageRoutes from "./routes/message.route.js";
+import friendRoutes from "./routes/friend.route.js";
+import path from "path";
+import dotenv from "dotenv";
+import cookieParser from "cookie-parser";
+import { connectDB } from "./lib/db.js";
+import { app, server } from "./lib/socket.js"; // 'app' is the express app, 'server' is http.Server
+import session from "express-session";
+import passport from "passport";
+import { configurePassport } from "./lib/passport.config.js";
+
+const __dirname = path.resolve();
+dotenv.config(); // Load environment variables
+
+configurePassport(); // Configure Passport.js strategies
+
+app.use(cookieParser());
+app.use(express.json({limit : '2mb'})); // Parse JSON request bodies
+app.use(express.urlencoded({ limit: '2mb', extended: true })); // Parse URL-encoded request bodies
+app.use(cors({
+    origin: "http://localhost:5173", // Allow requests from the frontend
+    credentials: true, // Allow cookies to be sent
+}));
+
+app.use(session({
+    secret: process.env.SESSION_SECRET,
+    resave: false,
+    saveUninitialized: false,
+    cookie: {
+        secure: process.env.NODE_ENV === "production", // true in production (HTTPS)
+        httpOnly: true, // Prevent client-side JS access to cookies
+        maxAge: 7 * 24 * 60 * 60 * 1000 // 7 days
+    }
+}));
+
+app.use(passport.initialize()); // Initialize Passport.js
+app.use(passport.session());    // Use Passport.js for session management
+
+app.use("/api/auth", authRoutes ); // Mount authentication routes
+app.use("/api/messages", messageRoutes ); // Mount message routes
+app.use("/api/friends", friendRoutes); // Mount friend routes
+
+const PORT = process.env.PORT;
+if(process.env.NODE_ENV === "production"){
+    // Serve static frontend assets in production
+    app.use(express.static(path.join(__dirname, "../frontend/dist")));
+    app.get("*" , (req, res) => {
+        res.sendFile(path.join(__dirname,"../frontend", "dist","index.html"));
+    })
+}
+
+server.listen(PORT, () => { // Start the HTTP server (which also handles Socket.IO)
+    console.log("server is running on PORT: " + String(PORT));
+    connectDB(); // Connect to MongoDB
+});
+```
+This snippet highlights the setup of various middleware, including `cors` for cross-origin requests, `express.json` and `express.urlencoded` for parsing request bodies, and `cookie-parser`, `express-session`, and `passport` for authentication management. It also demonstrates how routes are mounted and how the server dynamically serves the frontend assets when in production mode.
+
+**Key Insights:**
+
+*   **Middleware Chain:** The order of `app.use()` calls is crucial. `cors`, body parsers, `cookieParser`, `session`, and `passport` are configured before routes to ensure they process requests correctly.
+*   **Authentication Flow:** The combination of `express-session` and `passport` handles session-based authentication, storing session data (like user ID) in a cookie and managing user authentication state across requests. The `secure` and `httpOnly` cookie options are critical security measures.
+*   **Real-time Integration:** The `app` (Express) and `server` (HTTP server wrapped with Socket.IO) are imported from `./lib/socket.js`, indicating that Socket.IO is tightly integrated with the main HTTP server to handle both REST API and WebSocket connections on the same port.
+*   **Production Deployment:** The `if(process.env.NODE_ENV === "production")` block shows a common practice for MERN apps: serving the static frontend build (`frontend/dist`) directly from the backend server. This simplifies deployment, especially for single-server setups.
+
+### 2.6 Backend Component Interaction
+
+The following diagram illustrates the high-level interactions between the core backend components:
+
+
+
+
+
+```mermaid
+graph TD
+    User -->|HTTP/S Request| ExpressApp[Express Application];
+    ExpressApp -->|Middleware Chain| M1[Cookie-Parser];
+    M1 --> M2[Body Parsers (JSON, URL-encoded)];
+    M2 --> M3[CORS Middleware];
+    M3 --> M4[Express-Session];
+    M4 --> M5[Passport.js (Auth)];
+    M5 --> R[Routes (Auth, Messages, Friends)];
+    R --> DB[MongoDB Database];
+    DB --CRUD Ops--> Mongoose[Mongoose ODM];
+    Mongoose --> DB;
+    ExpressApp --Socket.IO Integration--> SocketIOServer[Socket.IO Server];
+    User --WebSocket Conn.--> SocketIOServer;
+    SocketIOServer -->|Real-time Events| ExpressApp;
+    Env[Environment Variables] --> ExpressApp;
+    Env --> M4;
+    Env --> M5;
+```
+
+
+
+## 3. Frontend Setup
+
+The frontend provides the interactive user interface for the application, built with React and powered by Vite for a fast development experience.
+
+### 3.1 Dependencies
+
+The frontend relies on various JavaScript libraries for UI, routing, state management, and API communication, as defined in [`frontend/package.json`](https://github.com/user/repo/blob/main/frontend/package.json).
+
+**Key Dependencies (`dependencies`):**
+
+*   `react`, `react-dom`: The core React libraries for building component-based UIs.
+*   `react-router-dom`: For client-side routing, enabling navigation between different pages/views without full page reloads.
+*   `axios`: A popular HTTP client for making API requests to the backend.
+*   `socket.io-client`: The client-side library for connecting to the Socket.IO server and handling real-time events.
+*   `zustand`: A lightweight and flexible state management solution.
+*   `lucide-react`, `react-icons`: Icon libraries for UI elements.
+*   `react-hot-toast`: A library for showing transient notifications (toasts) to users.
+
+**Development Dependencies (`devDependencies`):**
+
+*   `vite`, `@vitejs/plugin-react`: The build tool and development server, optimized for speed.
+*   `autoprefixer`, `postcss`, `tailwindcss`, `daisyui`: Tools for efficient and component-driven CSS styling.
+*   `eslint`, `@eslint/js`, `eslint-plugin-react`, `eslint-plugin-react-hooks`, `eslint-plugin-react-refresh`: Tools for static code analysis and linting, ensuring code quality.
+
+### 3.2 Installation
+
+To set up the frontend, navigate to the `frontend` directory in your terminal and install the dependencies:
+
+```bash
+cd frontend
+npm install
+```
+
+### 3.3 Running the Frontend
+
+Vite provides a lightning-fast development server.
+
+*   **Development Mode:**
+    ```bash
+    npm run dev
+    ```
+    This command, found in [`frontend/package.json`](https://github.com/user/repo/blob/main/frontend/package.json#L5), starts the Vite development server, usually on `http://localhost:5173`. It provides hot module replacement (HMR) for a smooth development experience.
+*   **Mobile Development (Access from Network):**
+    ```bash
+    npm run mobile
+    ```
+    This command starts the Vite server with `--host`, allowing it to be accessed from other devices on your local network (e.g., your mobile phone).
+*   **Building for Production:**
+    ```bash
+    npm run build
+    ```
+    This command compiles the React application into static files (HTML, CSS, JS) suitable for deployment, typically outputting them into a `dist` directory.
+*   **Previewing Production Build:**
+    ```bash
+    npm run preview
+    ```
+    After building, this command serves the `dist` directory locally to let you test the production build before actual deployment.
+
+### 3.4 Frontend Entry Point
+
+The [`frontend/src/main.jsx`](https://github.com/user/repo/blob/main/frontend/src/main.jsx) file is the entry point for the React application. It sets up the root component and integrates essential global contexts.
+
+```jsx title="frontend/src/main.jsx (snippet)"
+import { StrictMode } from 'react'
+import { createRoot } from 'react-dom/client'
+import './index.css' // Global CSS
+import App from './App.jsx' // Main application component
+import { BrowserRouter } from 'react-router-dom' // For client-side routing
+
+createRoot(document.getElementById('root')).render(
+  <StrictMode>
+    <BrowserRouter>
+      <App />
+    </BrowserRouter>
+  </StrictMode>,
+)
+```
+This snippet demonstrates the standard React setup: `createRoot` for rendering the application, `StrictMode` for identifying potential problems, and `BrowserRouter` for handling declarative client-side routing throughout the application.
+
+**Key Insights:**
+
+*   **Vite's Role**: Vite simplifies the development process by acting as both a dev server and a build tool, offering incredibly fast startup times and HMR.
+*   **React Router**: The `BrowserRouter` is wrapped around the main `App` component, making routing capabilities available globally to all components. This is fundamental for single-page applications (SPAs).
+*   **StrictMode**: This React feature helps catch potential issues in your components during development by running additional checks and warnings.
+
+### 3.5 Frontend Architecture
+
+The following diagram illustrates how the frontend application is structured and initialized:
+
+
+
+
+
+```mermaid
+graph TD
+    ViteDevServer[Vite Development Server] --> Browser[Web Browser];
+    Browser -->|Serves| IndexHTML[index.html];
+    IndexHTML -->|Loads main.jsx| MainJSX[main.jsx];
+    MainJSX --> StrictMode[React StrictMode];
+    StrictMode --> BrowserRouter[React BrowserRouter];
+    BrowserRouter --> AppComponent[App Component];
+    AppComponent --Renders--> UIComponents[Various UI Components (Chat, Auth, Profile)];
+    UIComponents --> Axios[Axios (API Calls)];
+    UIComponents --> SocketIOClient[Socket.IO Client (Real-time)];
+    UIComponents --> Zustand[Zustand (State Management)];
+    Axios --> BackendAPI[Backend API];
+    SocketIOClient --> BackendSocket[Backend Socket.IO];
+```
+
+
+
+## 4. Overall System Interaction
+
+The application operates as a full-stack system, with the frontend and backend communicating primarily via RESTful API calls and WebSockets for real-time interactions.
+
+### 4.1 Development Flow
+
+During development, the frontend (typically on `http://localhost:5173`) and backend (e.g., `http://localhost:5000`) run as separate processes. CORS is essential here to allow the frontend to make requests to the backend.
+
+### 4.2 Production Flow
+
+In a production environment, it's common to serve the static frontend assets directly from the backend server. The `backend/src/index.js` file includes logic to handle this:
+```javascript {70-76} title="backend/src/index.js (production serving)"
+// ... (previous code)
+
+const PORT = process.env.PORT;
+if(process.env.NODE_ENV === "production"){
+    // Serve static files from the 'dist' directory of the frontend project
+    app.use(express.static(path.join(__dirname, "../frontend/dist")));
+
+    // For any other GET request not handled by API routes, serve the frontend's index.html
+    app.get("*" , (req, res) => {
+        res.sendFile(path.join(__dirname,"../frontend", "dist","index.html"));
+    })
+}
+
+server.listen(PORT, () => {
+    console.log("server is running on PORT: " + String(PORT));
+    connectDB();
+});
+```
+This configuration ensures that all requests (both API calls and static file requests for the frontend) can be served from a single origin/port in production, simplifying deployment and avoiding potential CORS issues.
+
+### 4.3 High-Level Interaction Diagram
+
+
+
+
+
+```mermaid
+graph TD
+    U[User Browser] -->|HTTP/S Request| F[Frontend (React/Vite)];
+    F -->|REST API Calls (Axios)| B[Backend (Node.js/Express)];
+    B -->|Database Operations| DB[MongoDB Database];
+    F --WebSocket Connection--> SIO[Socket.IO Server];
+    B --Emits Events--> SIO;
+    SIO -->|Real-time Updates| F;
+    F --> U;
+    B --> U;
+```
+
+
+
+## 5. Key Integration Points and Best Practices
+
+*   **CORS Configuration**: The `cors` middleware in [`backend/src/index.js`](https://github.com/user/repo/blob/main/backend/src/index.js#L26-L29) explicitly allows requests from `http://localhost:5173` and enables `credentials: true` for sending cookies. This is crucial for authentication flows that rely on HTTP-only cookies. In production, `origin` would typically be set to the deployed frontend URL or configured to allow requests from specific trusted domains.
+*   **Authentication Flow**: The backend implements a robust authentication system using `passport` with `express-session`, and potentially JWTs for API protection. The `cookie` options (`secure: true` in production, `httpOnly: true`, `maxAge`) for `express-session` are vital security settings to protect session cookies.
+*   **Real-time Communication**: The application leverages Socket.IO for real-time features. The backend's `server` object (which wraps the Express app) is used to initialize Socket.IO, allowing both HTTP and WebSocket traffic on the same port. The frontend uses `socket.io-client` to connect and listen for events.
+*   **Environment Variable Management**: The use of `dotenv` across the backend ensures that sensitive information and configuration parameters are loaded from a `.env` file, promoting security and configurability across different environments.
+*   **Separation of Concerns**: The distinct `backend` and `frontend` directories, each with its own `package.json` and build processes, enforce a clear separation of concerns, making the application easier to develop, maintain, and scale.
+
+## Summary
+
+This "Getting Started" guide has walked through the essential steps to set up and run the full-stack application locally. You've learned about the key dependencies for both frontend and backend, how to install them, configure environment variables, and execute the respective development servers. Understanding the core initialization files and the interaction between components is fundamental to beginning your development journey with this project.
+
+Next: [Backend Architecture](./2_backend_architecture.mdx)

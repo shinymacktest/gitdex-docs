@@ -1,0 +1,350 @@
+---
+title: "Backend Data Models & Database"
+description: "Details on the database connection, Mongoose schemas, and data persistence layer."
+---
+
+# Backend Data Models & Database
+
+<TOC />
+
+This section delves into the core of the backend's data management, covering how the application connects to its MongoDB database, defines its data structures using Mongoose schemas, and interacts with these models through controller functions to ensure data persistence and retrieval.
+
+## Database Connection
+
+The application establishes its connection to MongoDB using Mongoose, an ODM (Object Data Modeling) library for Node.js. The connection logic is encapsulated in `backend/src/lib/db.js`.
+
+```javascript
+// backend/src/lib/db.js
+import mongoose from "mongoose"
+
+export const connectDB = async () => {
+  try {
+    const conn = await mongoose.connect(process.env.MONGODB_URI);
+    console.log(`MongoDB connected:  ${conn.connection.host}`);
+  }
+  catch(error){
+    console.log("MongoDB connection error: ", error);
+  }
+}
+```
+
+The `connectDB` function asynchronously connects to the MongoDB instance specified by the `MONGODB_URI` environment variable. Upon successful connection, it logs the host; otherwise, it logs an error.
+
+[Source](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/lib/db.js)
+
+## Mongoose Schemas
+
+Mongoose schemas define the structure of documents within MongoDB collections, enforcing data types, validations, and relationships. The application uses two primary schemas: `User` and `Message`.
+
+### User Model
+
+The `User` schema (`backend/src/models/user.model.js`) represents individual users in the system, storing their authentication details, profile information, and social connections.
+
+```javascript
+// backend/src/models/user.model.js
+import mongoose from "mongoose"
+
+const  userSchema = new mongoose.Schema(
+    {
+        email: {
+            type: String,
+            required: true,
+            unique: true
+        },
+        username: {
+            type: String,
+            required: [true, "Username is required"],
+            unique: true,
+            trim: true,
+            minlength: [3, "Username must be at least 3 characters long"],
+            maxlength: [20, "Username cannot be more than 20 characters long"]
+        }
+        ,
+        password: {
+            type: String,
+            minlength: 6,
+        },
+        profilePic: {
+            type: String,
+            default: "",
+        },
+        friends: [{
+            type: mongoose.Schema.Types.ObjectId,
+            ref: "User",
+            default: []
+        }],
+        friendRequests: [{ // Incoming friend requests
+            type: mongoose.Schema.Types.ObjectId,
+            ref: "User",
+            default: []
+        }],
+        sentRequests: [{ // Outgoing friend requests
+            type: mongoose.Schema.Types.ObjectId,
+            ref: "User",
+            default: []
+        }],
+        authProvider: {
+            type: String,
+            enum: ['email', 'google'],
+            default: 'email'
+        },
+        googleId: {
+            type: String,
+            unique: true,
+            sparse: true
+        },
+    },
+    {
+        timestamps: true
+    }
+);
+
+userSchema.pre('save', async function(next) {
+    if (this.authProvider === 'google' && !this.isModified('password')) {
+        this.password = undefined;
+    }
+    if (this.authProvider === 'email' && !this.password && this.isNew) {
+        return next(new Error('Password is required for email signup.'));
+    }
+    next();
+});
+
+const User = mongoose.model("User", userSchema);
+
+export default User;
+```
+
+Key aspects of the `User` schema include:
+- **`email`**: Unique and required for user identification.
+- **`username`**: Unique, required, with length constraints.
+- **`password`**: Stored hashed (though the schema only defines minimum length).
+- **`profilePic`**: URL for the user's avatar.
+- **`friends`, `friendRequests`, `sentRequests`**: Arrays of `ObjectId`s referencing other `User` documents, managing social connections.
+- **`authProvider`**: An enum (`'email'`, `'google'`) to distinguish authentication methods.
+- **`googleId`**: Unique and sparse, used for Google authentication.
+- **`timestamps`**: Automatically adds `createdAt` and `updatedAt` fields.
+- **`pre('save')` hook**: Ensures passwords are not set for Google-authenticated users and are required for email-based signups.
+
+[Source](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/models/user.model.js)
+
+### Message Model
+
+The `Message` schema (`backend/src/models/message.model.js`) defines the structure for chat messages exchanged between users.
+
+```javascript
+// backend/src/models/message.model.js
+import express from "express";
+import mongoose from "mongoose";
+
+const messageSchema = new mongoose.Schema(
+    {
+     senderId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User",
+        required: true,
+     },
+     receiverId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User",
+        required: true,
+     },
+     text: {
+        type: String,
+     },
+     image: {
+        type: String,
+     },
+    },
+    {timestamps: true}
+);
+
+export default mongoose.model("Message", messageSchema);
+```
+
+Key aspects of the `Message` schema include:
+- **`senderId`**: An `ObjectId` referencing the `User` who sent the message, required.
+- **`receiverId`**: An `ObjectId` referencing the `User` who is to receive the message, required.
+- **`text`**: The textual content of the message.
+- **`image`**: A URL for an image attachment.
+- **`timestamps`**: Automatically adds `createdAt` and `updatedAt` fields.
+
+[Source](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/models/message.model.js)
+
+### Schema Relationship Diagram
+
+The following diagram illustrates the relationships between the `User` and `Message` data models:
+
+````mermaid
+erDiagram
+    User {
+        ObjectId _id PK
+        String email UK
+        String username UK
+        String password
+        String profilePic
+        Array friends
+        Array friendRequests
+        Array sentRequests
+        String authProvider ENUM
+        String googleId UK,SPARSE
+        Date createdAt
+        Date updatedAt
+    }
+    Message {
+        ObjectId _id PK
+        ObjectId senderId FK "User"
+        ObjectId receiverId FK "User"
+        String text
+        String image
+        Date createdAt
+        Date updatedAt
+    }
+
+    User ||--o{ Message : "sends"
+    User ||--o{ Message : "receives"
+```
+
+## Data Persistence Layer (Controllers)
+
+Controllers interact with the Mongoose models to perform CRUD (Create, Read, Update, Delete) operations, facilitating data persistence.
+
+### Authentication Controller (`auth.controller.js`)
+
+The `auth.controller.js` manages user authentication and profile operations, extensively using the `User` model.
+
+```javascript
+// backend/src/controllers/auth.controller.js (Excerpts)
+import User from "../models/user.model.js";
+import bcrypt from "bcryptjs";
+import cloudinary from "../lib/cloudinary.js"; // For profile picture uploads
+
+export const signup = async (req, res) => {
+    // ... validation and checks ...
+    const hashedPassword = await bcrypt.hash(password, salt);
+
+    const newUser = new User({
+        username,
+        email,
+        password: hashedPassword,
+        authProvider: 'email'
+    });
+    if(newUser){
+        // ... generate token ...
+        await newUser.save(); // Persist new user
+        // ... response ...
+    }
+    // ... error handling ...
+};
+
+export const login = async (req, res) => {
+    const {email, password} = req.body;
+    try {
+        const user = await User.findOne({email}); // Find user by email
+        // ... password comparison and token generation ...
+    }
+    // ... error handling ...
+};
+
+export const checkUsernameAvailability = async (req, res) => {
+    try {
+        const { username } = req.params;
+        // ... validation ...
+        const existingUser = await User.findOne({ username: username }); // Check if username exists
+        // ... response ...
+    }
+    // ... error handling ...
+};
+
+export const updateProfile = async (req, res) => {
+    try {
+        const { profilePic, username } = req.body;
+        const userId = req.user._id;
+        let userToUpdate = await User.findById(userId); // Find user to update
+        // ... username validation and duplicate check ...
+        const existingUserWithNewUsername = await User.findOne({ username: newUsername, _id: { $ne: userId } });
+        // ... cloudinary upload for profilePic ...
+        const updatedUser = await User.findByIdAndUpdate(userId, { $set: fieldsToUpdate }, { new: true }); // Update user
+        // ... token generation and response ...
+    }
+    // ... error handling ...
+};
+```
+
+Database interactions within `auth.controller.js`:
+-   **`signup`**: Creates a new `User` instance and calls `newUser.save()` to insert it into the database. It also uses `User.findOne` to check for existing emails and usernames.
+-   **`login`**: Uses `User.findOne` to retrieve a user document based on their email for authentication.
+-   **`checkUsernameAvailability`**: Performs a `User.findOne` query to determine if a given username already exists.
+-   **`updateProfile`**: Uses `User.findById` to retrieve the current user's profile, `User.findOne` to check for username uniqueness during an update, and `User.findByIdAndUpdate` to apply changes to the user document.
+
+[Source](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/controllers/auth.controller.js)
+
+### Message Controller (`message.controller.js`)
+
+The `message.controller.js` handles all messaging-related functionalities, interacting with both `User` and `Message` models.
+
+```javascript
+// backend/src/controllers/message.controller.js (Excerpts)
+import User from "../models/user.model.js";
+import Message from "../models/message.model.js";
+import cloudinary from "../lib/cloudinary.js"; // For image message uploads
+
+export const getUsersForSidebar = async (req, res) => {
+    try {
+        const loggedInUserId = req.user._id;
+        // Find all users except the logged-in one, excluding their password
+        const filteredUsers = await User.find({
+            _id: { $ne: loggedInUserId }}).select("-password");
+        res.status(200).json(filteredUsers);
+    }
+    // ... error handling ...
+};
+
+export const getMessages = async (req, res) => {
+    try {
+        const {id : userToChatId } = req.params;
+        const myId = req.user._id;
+
+        // Find messages where sender and receiver match either direction
+        const messages = await Message.find({
+            $or: [
+                {senderId: myId, receiverId:userToChatId},
+                {senderId: userToChatId, receiverId: myId}
+            ]
+        });
+        res.status(200).json(messages);
+    }
+    // ... error handling ...
+};
+
+export const sendMessage = async (req, res) => {
+    try {
+        const { text, image } = req.body;
+        const { id: receiverId } = req.params;
+        const senderId = req.user._id;
+
+        let imageUrl;
+        if (image) {
+            const uploadResponse = await cloudinary.uploader.upload(image);
+            imageUrl = uploadResponse.secure_url;
+        }
+        const newMessage = new Message({ // Create new message instance
+            senderId,
+            receiverId,
+            text,
+            image: imageUrl,
+        });
+
+        await newMessage.save(); // Persist new message
+        // ... socket.io emit ...
+        res.status(201).json(newMessage);
+    }
+    // ... error handling ...
+};
+```
+
+Database interactions within `message.controller.js`:
+-   **`getUsersForSidebar`**: Uses `User.find` to fetch all users in the system, excluding the currently logged-in user, and omitting their password field for security.
+-   **`getMessages`**: Employs `Message.find` with an `$or` operator to retrieve all messages exchanged between two specific users, regardless of who was the sender or receiver.
+-   **`sendMessage`**: Creates a new `Message` instance and calls `newMessage.save()` to store the message in the database. It also handles image uploads to Cloudinary, storing the secure URL in the message document.
+
+[Source](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/controllers/message.controller.js)

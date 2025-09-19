@@ -1,0 +1,628 @@
+---
+title: "Real-time Communication (Chat)"
+description: "Explains the implementation of real-time chat functionality using Socket.IO for instant messaging."
+---
+
+# Real-time Communication (Chat)
+
+<TOC />
+
+This section details the implementation of real-time chat functionality, leveraging **Socket.IO** for instant message delivery and **Cloudinary** for image uploads. The architecture involves a robust backend for message persistence and real-time event handling, coupled with a responsive frontend for seamless user interaction.
+
+## Backend Implementation
+
+The backend handles message storage, user management for chat, and the core Socket.IO server for real-time communication.
+
+### Socket.IO Setup (`backend/src/lib/socket.js`)
+
+The `socket.js` file initializes the Socket.IO server, integrating it with the Express application. It's responsible for managing user connections, tracking online users, and facilitating real-time message delivery.
+
+```javascript filename="backend/src/lib/socket.js"
+import { Server } from "socket.io";
+import http from "http";
+import express from "express";
+
+const app = express();
+
+const server = http.createServer(app);
+
+const io = new Server(server, {
+    cors: {
+        origin: ["http://localhost:5173"]
+    }
+})
+
+export function getReceiverSocketId(userId) {
+    return userSocketMap[userId];
+}
+
+
+// used to store online users
+const userSocketMap = {}; //{userId : socketId}
+
+
+
+io.on("connection", (socket) => {
+    console.log("A user connected", socket.id);
+
+    const userId = socket.handshake.query.userId;
+    if(userId) userSocketMap[userId] = socket.id;
+
+    io.emit("getOnlineUsers", Object.keys(userSocketMap));
+
+    socket.on("disconnect", ()=>{
+        console.log("A user disconnected", socket.id);
+        delete userSocketMap[userId];
+        io.emit("getOnlineUsers", Object.keys(userSocketMap));
+    })
+})
+
+export { io, app, server };
+```
+
+**Key aspects:**
+
+*   **`Server` Initialization**: Creates a Socket.IO server instance, configuring CORS to allow connections from the frontend.
+*   **`userSocketMap`**: An object `userSocketMap` is used to store a mapping of `userId` to `socketId`. This allows the server to identify which socket belongs to which user, essential for directing messages to specific online users.
+*   **`io.on("connection", ...)`**: This event listener triggers whenever a new client connects.
+    *   It extracts the `userId` from the socket's handshake query.
+    *   If a `userId` is present, it's added to the `userSocketMap`.
+    *   `io.emit("getOnlineUsers", ...)` broadcasts the list of currently online users to all connected clients, allowing the frontend to update online status indicators.
+*   **`socket.on("disconnect", ...)`**: This listener handles client disconnections, removing the user from `userSocketMap` and broadcasting updated online users.
+*   **`getReceiverSocketId(userId)`**: A utility function to retrieve the `socketId` for a given `userId`, enabling targeted message delivery.
+
+<details>
+<summary>Mermaid Diagram: Socket.IO Connection and User Tracking</summary>
+
+````mermaid
+graph TD
+    subgraph Client (Frontend)
+        A[User connects to App] --> B(Socket.IO client establishes connection)
+        C(Receives "getOnlineUsers" event) --> D[Update Sidebar UI]
+        E(Receives "newMessage" event) --> F[Update Chat UI]
+    end
+
+    subgraph Server (Backend - Socket.IO)
+        G[Socket.IO Server Init]
+        G --> H{Client connects (io.on("connection"))}
+        H -- userId in handshake query --> I{Store userSocketMap: userId -> socketId}
+        I --> J(Emit "getOnlineUsers" to all clients)
+        H --> K{Client disconnects (socket.on("disconnect"))}
+        K --> L{Remove from userSocketMap}
+        L --> J
+    end
+
+    B -- WebSocket connection --> H
+    J --> C
+    M[New message sent via HTTP] --> N{Get receiverSocketId}
+    N -- If receiver online --> O(Emit "newMessage" to receiver's socket)
+    O --> E
+```
+</details>
+
+[Source](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/lib/socket.js)
+
+### Message Model (`backend/src/models/message.model.js`)
+
+The `Message` model defines the structure for chat messages stored in MongoDB.
+
+```javascript filename="backend/src/models/message.model.js"
+import express from "express";
+import mongoose from "mongoose";
+
+const messageSchema = new mongoose.Schema(
+    {
+     senderId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User",
+        required: true,
+     },
+     receiverId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User",
+        required: true,
+     },
+     text: {
+        type: String,
+     },
+     image: {
+        type: String,
+     },
+    },
+    {timestamps: true}
+);
+
+export default mongoose.model("Message", messageSchema);
+```
+
+**Schema details:**
+
+*   **`senderId`**, **`receiverId`**: MongoDB `ObjectId`s referencing the `User` model, ensuring messages are linked to specific users.
+*   **`text`**: The textual content of the message.
+*   **`image`**: A URL string to store the image hosted on Cloudinary. This field is optional.
+*   **`timestamps: true`**: Automatically adds `createdAt` and `updatedAt` fields for tracking message times.
+
+[Source](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/models/message.model.js)
+
+### Message Routes (`backend/src/routes/message.route.js`)
+
+These routes expose API endpoints for fetching users and messages, and for sending new messages. All routes are protected by the `protectRoute` middleware to ensure only authenticated users can access them.
+
+```javascript filename="backend/src/routes/message.route.js"
+import express from "express"
+import { protectRoute } from "../middleware/auth.middleware.js";
+import { getUsersForSidebar, getMessages, sendMessage } from "../controllers/message.controller.js";
+const router = express.Router();
+
+router.get("/users", protectRoute, getUsersForSidebar);
+
+router.get("/:id", protectRoute, getMessages);
+
+router.post("/send/:id", protectRoute, sendMessage);
+
+export default router;
+```
+
+*   **`GET /api/messages/users`**: Fetches a list of users for the chat sidebar.
+*   **`GET /api/messages/:id`**: Retrieves all messages between the authenticated user and a specific user (`id`).
+*   **`POST /api/messages/send/:id`**: Sends a new message to a specific user (`id`).
+
+[Source](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/routes/message.route.js)
+
+### Message Controller (`backend/src/controllers/message.controller.js`)
+
+The controller functions handle the business logic for message-related operations.
+
+```javascript filename="backend/src/controllers/message.controller.js"
+import User from "../models/user.model.js";
+import Message from "../models/message.model.js";
+import cloudinary from "../lib/cloudinary.js";
+import { getReceiverSocketId, io } from "../lib/socket.js";
+
+
+export const getUsersForSidebar = async (req, res) => {
+    try {
+        const loggedInUserId = req.user._id;
+        const filteredUsers = await User.find({
+            _id: { $ne: loggedInUserId }}).select("-password");
+        res.status(200).json(filteredUsers);
+    }
+    catch (error) {
+        console.log("Error in getUsersForSidebar: ", error);
+        res.status(500).json({ error: "Internal Server Error" });
+    }
+};
+
+export const getMessages = async (req, res) => {
+    try {
+        const {id : userToChatId } = req.params;
+        const myId = req.user._id;
+
+        const messages = await Message.find({
+            $or: [
+                {senderId: myId, receiverId:userToChatId},
+                {senderId: userToChatId, receiverId: myId}
+            ]
+        });
+        res.status(200).json(messages);
+    } catch (error) {
+        console.log("Error in getMessages controller:  ", error);
+        res.status(500).json({ error: "Internal Server Error" });
+    }
+};
+
+export const sendMessage = async (req, res) => {
+    try {
+        const { text, image } = req.body;
+        const { id: receiverId } = req.params;
+        const senderId = req.user._id;
+
+        let imageUrl;
+        if (image) {
+            const uploadResponse = await cloudinary.uploader.upload(image);
+
+            imageUrl = uploadResponse.secure_url;
+        }
+        const newMessage = new Message({
+            senderId,
+            receiverId,
+            text,
+            image: imageUrl,
+        });
+
+        await newMessage.save();
+
+        const receiverSocketId = getReceiverSocketId(receiverId);
+
+        if(receiverSocketId) {
+            io.to(receiverSocketId).emit("newMessage", newMessage);
+        }
+
+
+        res.status(201).json(newMessage);
+
+    } catch (error) {
+        console.log("Error in sendMessage controller:  ", error);
+        res.status(500).json({ error: "Internal Server Error" });
+    }
+};
+```
+
+**Functionality:**
+
+*   **`getUsersForSidebar`**: Fetches all users from the database except the currently logged-in user, primarily for displaying in the chat sidebar. User passwords are excluded from the results.
+*   **`getMessages`**: Retrieves all messages exchanged between the logged-in user and a specified `userToChatId`. It uses an `$or` query to find messages where the logged-in user is either the sender or the receiver.
+*   **`sendMessage`**:
+    *   Handles both text and image messages. If an `image` is provided in the request body (as a base64 string), it's uploaded to Cloudinary, and the secure URL is stored.
+    *   Creates a new `Message` document and saves it to the database.
+    *   **Real-time Delivery**: After saving, it attempts to get the `receiverSocketId` using the `getReceiverSocketId` helper. If the receiver is online (i.e., `receiverSocketId` exists), the `io.to(receiverSocketId).emit("newMessage", newMessage)` call sends the new message in real-time to the receiver's specific socket.
+
+<details>
+<summary>Mermaid Diagram: Message Sending Flow</summary>
+
+````mermaid
+sequenceDiagram
+    participant FE as Frontend
+    participant BE as Backend (API)
+    participant CL as Cloudinary
+    participant DB as Database
+    participant SIO as Socket.IO Server
+    participant OtherFE as Other Frontend
+
+    FE->>BE: POST /api/messages/send/:id with {text, image?}
+    activate BE
+    alt Image provided
+        BE->>CL: Upload image (base64)
+        activate CL
+        CL-->>BE: Image URL (secure_url)
+        deactivate CL
+    end
+    BE->>DB: Save new Message (senderId, receiverId, text, imageUrl?)
+    activate DB
+    DB-->>BE: Message saved
+    deactivate DB
+    BE->>BE: Call getReceiverSocketId(receiverId)
+    alt Receiver is online
+        BE->>SIO: Emit "newMessage" event to receiver's socket ID
+        activate SIO
+        SIO->>OtherFE: "newMessage" event received
+        deactivate SIO
+        OtherFE->>OtherFE: Add message to chat, update UI
+    else Receiver is offline
+        BE->>BE: No socket emission, message stored in DB
+    end
+    BE-->>FE: 201 Created (New message object)
+    deactivate BE
+    FE->>FE: Add message to chat, update UI (for sender)
+```
+</details>
+
+[Source](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/controllers/message.controller.js)
+
+## Frontend Implementation
+
+The frontend components integrate with the backend API and Socket.IO to provide an interactive chat experience.
+
+### Chat State Management (`frontend/src/store/useChatStore.js`)
+
+(File not provided, but inferred functionality from components)
+
+A Zustand store (`useChatStore`) likely manages the chat-specific state, including:
+
+*   `selectedUser`: The currently selected chat partner.
+*   `messages`: The array of messages for the current conversation.
+*   `users`: A list of all available users/friends.
+*   `isMessagesLoading`, `isUsersLoading`: Loading states for API calls.
+*   `getFriends()`: Fetches users for the sidebar.
+*   `getMessages(userId)`: Fetches messages for a specific user.
+*   `sendMessage({text, image})`: Sends a new message via the API.
+*   `subscribeToMessages()`, `unsubscribeFromMessages()`: Manages Socket.IO event listeners for real-time updates.
+*   `setMessages(newMessage)`: Updates the messages array.
+
+### Sidebar (`frontend/src/components/Sidebar.jsx`)
+
+The `Sidebar` component displays a list of available chat partners.
+
+```javascript filename="frontend/src/components/Sidebar.jsx"
+import { useEffect, useState } from "react";
+import { useChatStore } from "../store/useChatStore";
+import SidebarSkeleton from "./skeletons/SidebarSkeleton";
+import { Users } from "lucide-react";
+import { useAuthStore } from "../store/useAuthStore";
+
+const Sidebar = () => {
+    const { getFriends, users, selectedUser, setSelectedUser, isUsersLoading } =
+        useChatStore();
+
+    const { onlineUsers } = useAuthStore();
+    const [showOnlineOnly, setShowOnlineOnly] = useState(false);
+    useEffect(() => {
+        getFriends();
+    }, [getFriends]);
+    const filteredUsers = showOnlineOnly
+        ? users.filter((user) => onlineUsers.includes(user._id))
+        : users;
+    if (isUsersLoading) return <SidebarSkeleton />;
+    return (
+        <div className={`h-full sm:w-72 sm:border-r border-base-300  flex-col transition-all duration-200 ${selectedUser ?
+                                    "hidden sm:flex w-[100vw] "
+                                    : ""}`}>
+            <div className="border-b border-base-300  p-5">
+                <div className="flex items-center gap-2">
+                    <Users className="size-6"></Users>
+                    <span className="font-medium  lg:block">
+                        Friends
+                    </span>
+                </div>
+                {/* Online toggle filter remaining */}
+                <div className="mt-3 lg:flex items-center gap-2">
+                    <label className="cursor-pointer flex items-center gap-2">
+                        <input
+                            type="checkbox"
+                            checked={showOnlineOnly}
+                            onChange={(e) =>
+                                setShowOnlineOnly(e.target.checked)
+                            }
+                            className="checkbox checkbox-sm"
+                        />
+                        <span className="text-sm">Show online only</span>
+                    </label>
+                    <span className="text-xs text-zinc-500">
+                          ({users.filter(friend => onlineUsers.includes(friend._id)).length} online)
+                    </span>
+                </div>
+                <div className="overflow-y-scroll h-[calc(100vh-14rem)] w-full flex flex-col py-3">
+                    {filteredUsers.map((user) => (
+                        <b
+```
+
+**Highlights:**
+
+*   **`useEffect`**: Calls `getFriends()` on component mount to fetch the list of users from the backend.
+*   **`onlineUsers`**: Utilizes `useAuthStore` to get the list of currently online user IDs, which is updated via Socket.IO events.
+*   **Filtering**: Allows users to filter the list to `showOnlineOnly`.
+*   **`setSelectedUser`**: When a user is clicked, `setSelectedUser` is called from `useChatStore` to update the currently selected chat partner.
+
+[Source](https://github.com/shinymack/Chat-App-MERN/blob/main/frontend/src/components/Sidebar.jsx)
+
+### Chat Container (`frontend/src/components/ChatContainer.jsx`)
+
+The `ChatContainer` component displays the messages for the selected conversation.
+
+```javascript filename="frontend/src/components/ChatContainer.jsx"
+import { useEffect } from "react";
+import { useChatStore } from "../store/useChatStore";
+import ChatHeader from "./ChatHeader";
+import MessageInput from "./MessageInput";
+import MessageSkeleton from "./skeletons/MessageSkeleton";
+import { useAuthStore } from "../store/useAuthStore";
+import { formatMessageTime } from "../lib/utils";
+import { useRef } from "react";
+
+const ChatContainer = () => {
+    const { messages, getMessages, isMessagesLoading, selectedUser, subscribeToMessages, unsubscribeFromMessages } =
+        useChatStore();
+    const { authUser } = useAuthStore();
+    const messageEndRef = useRef(null);
+
+
+    useEffect(() => {
+        getMessages(selectedUser._id);
+        subscribeToMessages();
+
+        return () => unsubscribeFromMessages();
+    }, [selectedUser._id, getMessages, subscribeToMessages, unsubscribeFromMessages]);
+
+    useEffect(() => {
+        if(messageEndRef.current && messages){
+            messageEndRef.current.scrollIntoView({behaviour : "smooth"})
+        }
+    }, [messages])
+
+    if (isMessagesLoading)
+        return (
+            <div className="flex-1 flex flex-col overflow-auto">
+                <ChatHeader />
+                <MessageSkeleton />
+                <MessageInput />
+            </div>
+        );
+    return (
+        <div className="flex-1 flex flex-col overflow-auto">
+            <ChatHeader />
+            <div className="flex-1 overflow-y-auto p-4 space-y-4">
+                {messages.map((message) => (
+                    <div
+                        key={message._id}
+                        className={`chat ${message.senderId == authUser._id ? "chat-end": "chat-start"} `}
+                        ref={messageEndRef}
+                    >
+                        <div className="chat-image avatar">
+                            <div className="size-9 rounded-full border">
+                                <img
+                                    src={message.senderId == authUser._id ? authUser.profilePic || "/avatar.png": selectedUser.profilePic || "/avatar.png"}
+                                    alt="profilepic"
+                                 />
+                            </div>
+                        </div>
+                        <div className="chat-header mb-1">
+                            <time className="text-xs opacity-50 ml-1">{formatMessageTime(message.createdAt)}</time>
+                        </div>
+                        <div className="chat-bubble flex flex-col">
+                            {message.image && (
+                                <img
+                                    src={message.image}
+                                    alt="Attachment"
+                                    className="sm:max-w-[200px] rounded-md "
+                                />
+                            )}
+                            {message.text && <p>{message.text}</p>}
+                        </div>
+                    </div>
+                ))}
+            </div>
+            <MessageInput />
+        </div>
+    );
+};
+
+export default ChatContainer;
+```
+
+**Highlights:**
+
+*   **`useEffect` (Initial Load & Real-time)**:
+    *   Fetches existing messages for the `selectedUser` using `getMessages`.
+    *   Calls `subscribeToMessages()` to set up a Socket.IO listener for `newMessage` events. When a new message arrives in real-time, the `messages` state in `useChatStore` is updated.
+    *   Returns `unsubscribeFromMessages()` as a cleanup function to remove the listener when the component unmounts or `selectedUser` changes, preventing memory leaks.
+*   **`messageEndRef`**: A `useRef` hook used to automatically scroll the chat to the latest message whenever the `messages` array updates.
+*   **Message Rendering**: Iterates through the `messages` array, displaying each message with appropriate styling (`chat-end` for sender, `chat-start` for receiver), profile pictures, timestamps, and handling both text and image content.
+
+[Source](https://github.com/shinymack/Chat-App-MERN/blob/main/frontend/src/components/ChatContainer.jsx)
+
+### Message Input (`frontend/src/components/MessageInput.jsx`)
+
+This component provides the interface for typing and sending messages, including support for image attachments.
+
+```javascript filename="frontend/src/components/MessageInput.jsx"
+import { useRef, useState } from "react";
+import { useChatStore } from "../store/useChatStore";
+import { Image, Send, X } from "lucide-react";
+import toast from "react-hot-toast";
+
+const MessageInput = () => {
+    const [text, setText] = useState("");
+    const [imagePreview, setImagePreview] = useState(null);
+    const fileInputRef = useRef(null);
+    const { sendMessage } = useChatStore();
+
+    const handleImageChange = (e) => {
+        const file = e.target.files[0];
+        if (!file.type.startsWith("image/")) {
+            toast.error("Please select an image file");
+            return;
+        }
+
+        const reader = new FileReader();
+        reader.onloadend = () => {
+            setImagePreview(reader.result);
+        };
+        reader.readAsDataURL(file);
+    };
+
+    const removeImage = () => {
+        setImagePreview(null);
+        if (fileInputRef.current) fileInputRef.current.value = "";
+    };
+
+    const handleSendMessage = async (e) => {
+        e.preventDefault();
+        if (!text.trim() && !imagePreview) return;
+
+        try {
+            await sendMessage({
+                text: text.trim(),
+                image: imagePreview,
+            });
+
+            setText("");
+            setImagePreview(null);
+            if (fileInputRef.current) fileInputRef.current = "";
+        } catch (error) {
+            console.error("Failed to send message", error);
+        }
+    };
+
+    return (
+        <div className="p-4 w-full">
+            {imagePreview && (
+                <div className="mb-3 flex items-center gap-2">
+                    <div className="relative">
+                        <img
+                            src={imagePreview}
+                            alt="Preview"
+                            className="w-20 h-20 object-cover rounded-lg border border-zinc-700"
+                        />
+                        <button
+                            onClick={removeImage}
+                            className="absolute -top-1.5 -right-1.5 w-5 h-5 rounded-full bg-base-300
+              flex items-center justify-center"
+                            type="button"
+                        >
+                            <X className="size-3" />
+                        </button>
+                    </div>
+                </div>
+            )}
+
+            <form
+                onSubmit={handleSendMessage}
+                className="flex items-center gap-2"
+            >
+                <div className="flex flex-1 gap-2">
+                    <input
+                        type="text"
+                        className="w-full input input-bordered rounded-lg input-sm sm:input-md"
+                        placeholder="Type a message..."
+                        value={text}
+                        onChange={(e) => setText(e.target.value)}
+                    />
+                    <input
+                        type="file"
+                        accept="image/*"
+                        className="hidden"
+                        ref={fileInputRef}
+                        onChange={handleImageChange}
+                    />
+
+                    <button
+                        type="button"
+                        className={`hidden sm:flex btn btn-circle
+                            ${
+                                imagePreview
+                                    ? "text-emerald-500"
+                                    : "text-zinc-400"
+                            }`}
+                        onClick={
+                            () => {
+                                if (fileInputRef.current) {
+                                    fileInputRef.current.click();
+                                } else {
+                                    console.error("fileInputRef is not attached");
+                                }
+                        }
+                        }
+                    >
+                        <Image size={20} />
+                    </button>
+                </div>
+
+                <button
+                    type="submit"
+                    className="btn btn-sm btn-circle"
+                    disabled={!text.trim() && !imagePreview}
+                >
+                    <Send size={22} />
+                </button>
+            </form>
+        </div>
+    );
+};
+
+export default MessageInput;
+```
+
+**Highlights:**
+
+*   **State Management**: `text` for message content, `imagePreview` for showing the selected image, and `fileInputRef` to programmatically trigger the hidden file input.
+*   **`handleImageChange`**: Reads the selected image file as a Data URL for previewing and validates it as an image.
+*   **`removeImage`**: Clears the image preview and resets the file input.
+*   **`handleSendMessage`**:
+    *   Prevents sending empty messages.
+    *   Calls `sendMessage()` from `useChatStore`, passing the text and the base64 encoded image.
+    *   Resets the input fields and image preview after successful submission.
+*   **Image Upload UX**: A hidden file input triggered by a visible button, with a preview of the selected image and an option to remove it.
+
+[Source](https://github.com/shinymack/Chat-App-MERN/blob/main/frontend/src/components/MessageInput.jsx)
+
+Next: [Project Configuration & Styling](./6_project_configuration_styling.mdx)

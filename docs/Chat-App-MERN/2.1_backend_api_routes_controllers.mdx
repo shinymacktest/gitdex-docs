@@ -1,0 +1,257 @@
+---
+title: "Backend API: Routes & Controllers"
+description: "Explains how API endpoints are defined and how incoming requests are processed by controllers."
+---
+
+# Backend API: Routes & Controllers
+
+<TOC />
+
+The backend API of this application is structured around a clear separation of concerns, utilizing **routes** to define API endpoints and **controllers** to handle the business logic associated with those endpoints. This section details how incoming requests are matched to specific routes and subsequently processed by their corresponding controller functions.
+
+## Architectural Overview
+
+At a high level, when a client sends an HTTP request to the server, the following flow occurs:
+
+1.  **Request Reception**: The main application file (`backend/src/index.js`) listens for incoming requests.
+2.  **Route Matching**: Requests are directed to specific route files (e.g., `auth.route.js`, `friend.route.js`) based on their URL path.
+3.  **Middleware Execution**: Before reaching the controller, requests might pass through one or more middleware functions (e.g., `auth.middleware.js`) for tasks like authentication, logging, or input validation.
+4.  **Controller Processing**: The matched route invokes a specific controller function, which contains the core logic to process the request, interact with the database (via models), and prepare a response.
+5.  **Response Sending**: The controller sends an appropriate HTTP response back to the client.
+
+Here's a simplified sequence diagram illustrating the flow for a user signup request:
+
+````mermaid
+sequenceDiagram
+    participant C as Client
+    participant R as Routes (e.g., auth.route.js)
+    participant M as Middleware (e.g., auth.middleware.js)
+    participant CL as Controller (e.g., auth.controller.js)
+    participant DB as Database (User Model)
+
+    C->>R: POST /api/auth/signup {username, email, password}
+    activate R
+    R->>M: (optional) Authenticate/Validate request
+    activate M
+    M-->>R: Request validated
+    deactivate M
+    R->>CL: Call signup(req, res)
+    activate CL
+    CL->>DB: Check if username/email exists, hash password
+    activate DB
+    DB-->>CL: User data / Status
+    deactivate DB
+    alt If new user created
+        CL->>CL: Generate JWT Token (utils.js)
+        CL->>DB: Save new user
+        activate DB
+        DB-->>CL: User saved
+        deactivate DB
+        CL->>C: 201 Created (User data, JWT cookie)
+    else If validation/DB error
+        CL->>C: 400 Bad Request / 500 Internal Server Error
+    end
+    deactivate CL
+    deactivate R
+```
+
+## Controllers: Processing Requests
+
+Controllers are JavaScript functions responsible for handling the core business logic of the application. They receive the `request` and `response` objects, interact with models (to read/write data from the database), and construct the HTTP response.
+
+### 1. Authentication Controller (`auth.controller.js`)
+
+This controller manages all user authentication and profile-related functionalities, including signup, login, logout, user session checks, and profile updates.
+
+[Source](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/controllers/auth.controller.js)
+
+#### Key Functions and Logic:
+
+*   **`signup`**:
+    *   **Input Validation**: Checks for presence of username, email, password, and their respective length constraints.
+    *   **Uniqueness Checks**: Ensures email and username are not already registered.
+    *   **Password Hashing**: Uses `bcryptjs` to securely hash the user's password before storing it.
+    *   **Token Generation**: Upon successful signup, a JSON Web Token (JWT) is generated using `generateToken` and set as an HTTP-only cookie.
+    *   **User Creation**: A new `User` document is created and saved to the database.
+    *   **Response**: Returns the new user's public details and a success status (201 Created).
+
+    ```javascript showLineNumbers
+    export const signup = async (req, res) => {
+        const {username, email, password} = req.body;
+        try {
+            if(!username || !email || !password) {
+                return res.status(400).json({message: "Please fill in all fields."});
+            }
+            // ... (validation for length, existing user by email/username)
+
+            const salt = await bcrypt.genSalt(10);
+            const hashedPassword = await bcrypt.hash(password, salt);
+
+            const newUser = new User({
+                username,
+                email,
+                password: hashedPassword,
+                authProvider: 'email'
+            });
+            if(newUser){
+                generateToken(newUser._id, res); // Generate JWT
+                await newUser.save();
+
+                res.status(201).json({
+                    _id: newUser._id,
+                    username: newUser.username,
+                    email: newUser.email,   
+                    profilePic: newUser.profilePic,
+                    authProvider: newUser.authProvider
+                });
+            } else {
+                res.status(400).json({message: "Invalid user data."});
+            }
+        } catch (error) {
+            console.log("Error in signup controller", error.message)
+            res.status(500).json({message: "Something went wrong."});
+        }
+    };
+    ```
+
+*   **`login`**:
+    *   **User Retrieval**: Finds the user by email.
+    *   **Password Comparison**: Compares the provided password with the stored hashed password using `bcrypt.compare`.
+    *   **Authentication Provider Check**: Handles cases where a user might have signed up via Google.
+    *   **Token Generation**: On successful login, generates and sets a new JWT.
+    *   **Response**: Returns the authenticated user's details and a success status (200 OK).
+
+*   **`logout`**: Clears the JWT cookie, effectively logging out the user.
+
+*   **`checkAuth`**: Verifies the current user's session by returning their details from `req.user` (populated by authentication middleware).
+
+*   **`googleAuthCallback`**: Handles the callback after a successful Google OAuth authentication, generates a token, and redirects to the frontend.
+
+*   **`checkUsernameAvailability`**: Checks if a given username is available or already taken, considering the current user's existing username.
+
+*   **`updateProfile`**:
+    *   **User Identification**: Uses `req.user._id` (from authentication middleware) to identify the user.
+    *   **Fields to Update**: Processes `profilePic` and `username` from the request body.
+    *   **Username Validation**: If `username` is provided and changed, it validates its length and checks for uniqueness against other users.
+    *   **Profile Picture Upload**: If `profilePic` is provided (e.g., as a base64 string), it's uploaded to Cloudinary, and the secure URL is stored.
+    *   **Database Update**: Uses `findByIdAndUpdate` to update the user document.
+    *   **Token Refresh**: Generates a new JWT to ensure the cookie reflects any updated user information.
+    *   **Response**: Returns the updated user object.
+
+    ```javascript showLineNumbers
+    export const updateProfile = async (req, res) => {
+        try {
+            const { profilePic, username } = req.body;
+            const userId = req.user._id;
+            let userToUpdate = await User.findById(userId);
+
+            if (!userToUpdate) {
+                return res.status(404).json({ message: "User not found." });
+            }
+
+            const fieldsToUpdate = {};
+            let newUsername = username ? username.trim() : null;
+
+            // Handle username update logic (validation, uniqueness check)
+            if (newUsername && newUsername !== userToUpdate.username) {
+                // ... (username length validation, check for existing user)
+                fieldsToUpdate.username = newUsername;
+            }
+
+            // Handle profile picture upload to Cloudinary
+            if (profilePic) {
+                const uploadResponse = await cloudinary.uploader.upload(profilePic);
+                fieldsToUpdate.profilePic = uploadResponse.secure_url;
+            }
+
+            if (Object.keys(fieldsToUpdate).length === 0) {
+                return res.status(400).json({ message: "No changes provided to update." });
+            }
+
+            const updatedUser = await User.findByIdAndUpdate(userId, { $set: fieldsToUpdate }, { new: true });
+
+            generateToken(updatedUser._id, res); // Refresh JWT token
+            res.status(200).json(updatedUser);
+
+        } catch (error) {
+            console.error("Error in updateProfile controller", error.message);
+            res.status(500).json({ message: "Internal Server Error while updating profile." });
+        }
+    };
+    ```
+
+### 2. Friend Controller (`friend.controller.js`)
+
+This controller handles all operations related to managing friend requests and connections between users.
+
+[Source](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/controllers/friend.controller.js)
+
+#### Key Functions and Logic:
+
+*   **`sendFriendRequest`**:
+    *   **Identifier**: Accepts either a `username` or `email` to identify the potential friend.
+    *   **User Lookup**: Finds the target user by the provided identifier.
+    *   **Self-Request Prevention**: Prevents a user from sending a friend request to themselves.
+    *   **Status Checks**: Verifies if users are already friends, if a request has already been sent, or if a request from the target user is pending.
+    *   **Update User Models**: If conditions are met, the sender's `sentRequests` array and the receiver's `friendRequests` array are updated in the database.
+    *   **Response**: Confirms the request has been sent.
+
+    ```javascript showLineNumbers
+    export const sendFriendRequest = async (req, res) => {
+        try {
+            const { identifier } = req.body;
+            const senderId = req.user._id;
+
+            if (!identifier) {
+                return res.status(400).json({ message: "Username or email is required." });
+            }
+
+            const receiver = await User.findOne({
+                $or: [{ username: identifier }, { email: identifier }]
+            });
+
+            if (!receiver) {
+                return res.status(404).json({ message: "User not found." });
+            }
+            
+            const receiverId = receiver._id;
+
+            if (senderId.toString() === receiverId.toString()) {
+                return res.status(400).json({ message: "You cannot send a friend request to yourself." });
+            }
+
+            const sender = await User.findById(senderId);
+
+            // ... (Checks for existing friendship or requests)
+
+            sender.sentRequests.push(receiverId);
+            receiver.friendRequests.push(senderId);
+
+            await sender.save();
+            await receiver.save();
+
+            res.status(200).json({ message: "Friend request sent successfully." });
+
+        } catch (error) {
+            console.error("Error in sendFriendRequest: ", error.message);
+            res.status(500).json({ message: "Internal server error", error: error.message });
+        }
+    };
+    ```
+
+*   **`acceptFriendRequest`**:
+    *   **Request Verification**: Checks if the incoming request (`senderId`) exists in the current user's (`receiverId`) `friendRequests`.
+    *   **Friendship Establishment**: Adds both users to each other's `friends` arrays.
+    *   **Cleanup**: Removes the request from `friendRequests` for the receiver and `sentRequests` for the sender.
+    *   **Response**: Confirms the friendship.
+
+*   **`rejectFriendRequest`**:
+    *   **Request Verification**: Checks for the existence of the request.
+    *   **Cleanup**: Removes the request from `friendRequests` for the receiver and `sentRequests` for the sender without establishing friendship.
+    *   **Response**: Confirms the request rejection.
+
+## Conclusion
+
+The API routes define the available endpoints, while the controllers provide the specific functions that execute when those endpoints are hit. This structure ensures a clean, modular, and maintainable backend, with clear responsibilities for each component.
+
+Next: [Backend Data Models & Database](./2.2_backend_data_models_database.mdx)

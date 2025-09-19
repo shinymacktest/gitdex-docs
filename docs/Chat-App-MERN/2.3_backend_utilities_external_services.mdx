@@ -1,0 +1,310 @@
+---
+title: "Backend Utilities & External Services"
+description: "Covers helper functions, third-party integrations like Cloudinary, and Passport.js configuration."
+---
+
+# Backend Utilities & External Services
+
+<TOC />
+
+This section delves into the auxiliary components of the backend, including essential helper functions, configurations for third-party integrations like Cloudinary for media management, and the setup for authentication strategies using Passport.js. These utilities streamline development and provide robust functionalities across the application.
+
+### Cloudinary Configuration (`backend/src/lib/cloudinary.js`)
+
+This file is responsible for initializing and configuring the Cloudinary SDK, enabling media (images, videos) uploads to the Cloudinary cloud service.
+
+*   **Key Concept**: Securely configures Cloudinary using environment variables for `cloud_name`, `api_key`, and `api_secret`. This centralized setup ensures that any part of the application needing to interact with Cloudinary imports this pre-configured instance.
+
+```javascript
+import {v2 as cloudinary} from "cloudinary"
+import { config } from 'dotenv'
+
+config();
+
+cloudinary.config({
+    cloud_name: process.env.CLOUDINARY_CLOUD_NAME,
+    api_key: process.env.CLOUDINARY_API_KEY,
+    api_secret: process.env.CLOUDINARY_API_SECRET,
+});
+
+export default cloudinary;
+```
+
+*   **Usage**: The exported `cloudinary` instance can be directly used in controllers or services to upload, transform, and manage media files, as seen in the `updateProfile` function within `auth.controller.js`.
+
+[Source](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/lib/cloudinary.js)
+
+### Utility Functions (`backend/src/lib/utils.js`)
+
+This module provides common utility functions, primarily for JSON Web Token (JWT) management.
+
+*   **`generateToken(userId, res)`**: This function creates a JWT for a given `userId` and sets it as an HTTP-only cookie in the response.
+    *   **Purpose**: To securely authenticate users by issuing a token that the client stores and sends with subsequent requests.
+    *   **Security**: Uses `httpOnly` to prevent client-side JavaScript access to the cookie, `sameSite: "strict"` for CSRF protection, and `secure` for HTTPS environments.
+
+```javascript
+import jwt from 'jsonwebtoken';
+
+export const generateToken = (userId, res) => {
+    const token = jwt.sign({userId}, process.env.JWT_SECRET,
+        {expiresIn: "7d"});
+
+    res.cookie("jwt", token, {
+        maxAge: 7 * 24 * 60 * 60 * 1000,
+        httpOnly: true,
+        sameSite: "strict",
+        secure: process.env.NODE_ENV !== "development",
+    });
+    return token;
+};
+```
+
+[Source](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/lib/utils.js)
+
+### Passport.js Configuration (`backend/src/lib/passport.config.js`)
+
+This file sets up Passport.js, a popular authentication middleware for Node.js, specifically configuring Google OAuth2.0 strategy.
+
+*   **`configurePassport()`**: This function is called once at application startup to initialize Passport strategies.
+    *   **Google Strategy**: Integrates with Google for user authentication. It handles the callback from Google after a user grants permission, creates a new user if they don't exist (with specific handling for unique usernames and email conflicts), or logs in an existing user.
+    *   **Serialization/Deserialization**:
+        *   `serializeUser`: Stores only the user's MongoDB `_id` in the session after a successful login.
+        *   `deserializeUser`: Fetches the full user object from the database using the stored `_id` on subsequent requests, attaching it to `req.user`.
+
+```javascript
+import passport from 'passport';
+import { Strategy as GoogleStrategy } from 'passport-google-oauth20';
+import User from '../models/user.model.js';
+import dotenv from 'dotenv';
+
+dotenv.config();
+
+export const configurePassport = () => {
+    passport.use(new GoogleStrategy({
+        clientID: process.env.GOOGLE_CLIENT_ID,
+        clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+        callbackURL: process.env.GOOGLE_CALLBACK_URL,
+        scope: ['profile', 'email']
+    },
+    async (accessToken, refreshToken, profile, done) => {
+        try {
+            let user = await User.findOne({ googleId: profile.id });
+
+            if (user) {
+                return done(null, user);
+            } else {
+                // Logic to create new user with unique username and handle existing email conflicts
+                let username = profile.displayName.replace(/\s+/g, '').toLowerCase() || `user${Date.now()}`;
+                const existingUserByUsername = await User.findOne({ username });
+                if (existingUserByUsername) {
+                    username = `${username}${Date.now().toString().slice(-4)}`;
+                }
+                if (username.length > 20) username = username.substring(0,20);
+
+                const newUser = new User({
+                    googleId: profile.id,
+                    email: profile.emails && profile.emails[0] ? profile.emails[0].value : null,
+                    username: username,
+                    authProvider: 'google',
+                });
+
+                if (!newUser.email) {
+                    return done(new Error("Email not provided by Google. Cannot create account."), null);
+                }
+
+                const existingUserByEmail = await User.findOne({ email: newUser.email });
+                if (existingUserByEmail && existingUserByEmail.authProvider !== 'google') {
+                    return done(null, false, { message: `An account with email ${newUser.email} already exists. Please sign in using your original method.` });
+                }
+
+                await newUser.save();
+                return done(null, newUser);
+            }
+        } catch (error) {
+            return done(error, null);
+        }
+    }));
+
+    passport.serializeUser((user, done) => {
+        done(null, user.id);
+    });
+
+    passport.deserializeUser(async (id, done) => {
+        try {
+            const user = await User.findById(id);
+            done(null, user);
+        } catch (error) {
+            done(error, null);
+        }
+    });
+};
+```
+
+[Source](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/lib/passport.config.js)
+
+### Authentication Middleware (`backend/src/middleware/auth.middleware.js`)
+
+This middleware provides route protection by verifying the JWT sent with requests.
+
+*   **`protectRoute`**: This function checks for a JWT in the request cookies.
+    *   **Steps**:
+        1.  Extracts the `jwt` token from cookies.
+        2.  Verifies the token's authenticity using `jwt.verify` and the `JWT_SECRET`.
+        3.  Decodes the `userId` from the token.
+        4.  Fetches the corresponding user from the database.
+        5.  Attaches the authenticated user object to `req.user`, making user data available to subsequent route handlers.
+    *   **Error Handling**: Returns `401 Unauthorized` if no token, invalid token, or user not found.
+
+```javascript
+import jwt from "jsonwebtoken"
+import User from "../models/user.model.js"
+
+export const protectRoute = async (req, res, next) => {
+    try {
+        const token = req.cookies.jwt;
+        if(!token){
+            return res.status(401).json({message: "Unauthorized - No Token Provided"});
+        }
+
+        const decoded = jwt.verify(token, process.env.JWT_SECRET)
+
+        if(!decoded) {
+            return res.status(401).json({message: "Unauthorized - Invalid Token"});
+        }
+        const user = await User.findById(decoded.userId).select("-password");
+
+        if(!user) {
+            return res.status(404).json({message: "User not found"});
+        }
+        req.user = user;
+
+        next();
+    } catch (error) {
+        console.log("Error in protectRoute middleware", error.message);
+        res.status(500).json({message: "Internal Server Error"});
+    }
+};
+```
+
+[Source](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/middleware/auth.middleware.js)
+
+### Authentication Controllers (`backend/src/controllers/auth.controller.js`)
+
+This file contains the core logic for user authentication, registration, session management, and profile updates. It leverages the `cloudinary` service and `generateToken` utility.
+
+*   **`signup`**: Handles user registration, including validation (username, email, password length), checking for existing users, hashing passwords with `bcryptjs`, saving the new user, and generating a JWT.
+*   **`login`**: Authenticates users by verifying credentials. It checks for valid email and password, handles specific cases for Google-authenticated users, and generates a JWT upon successful login.
+*   **`logout`**: Clears the `jwt` cookie, effectively logging out the user.
+*   **`checkAuth`**: Verifies the current user's session by responding with the authenticated user's details (available via `req.user` from `protectRoute` middleware).
+*   **`googleAuthCallback`**: The final endpoint for Google OAuth. After Passport.js successfully authenticates the user, this function generates a JWT and redirects the user back to the frontend.
+*   **`checkUsernameAvailability`**: An endpoint to check if a desired username is available, performing validations and database checks.
+*   **`updateProfile`**: Allows users to update their profile picture and username. It interacts with Cloudinary for image uploads and performs validations for the new username before updating the user in the database. A new JWT is issued if the profile is updated.
+
+#### Snippets from `auth.controller.js`:
+
+**Signup (Password Hashing & Token Generation):**
+```javascript
+// ...
+const salt = await bcrypt.genSalt(10);
+const hashedPassword = await bcrypt.hash(password, salt);
+
+const newUser = new User({
+    username, email, password: hashedPassword, authProvider: 'email'
+});
+if(newUser){
+    generateToken(newUser._id, res); // Using the utility function
+    await newUser.save();
+    res.status(201).json({ /* user data */ });
+}
+// ...
+```
+
+**Login (Password Comparison & Token Generation):**
+```javascript
+// ...
+const isPasswordCorrect = await bcrypt.compare(password, user.password);
+if(!isPasswordCorrect) {
+    return res.status(400).json({message: "Invalid credentials."});
+}
+generateToken(user._id, res); // Using the utility function
+res.status(200).json({ /* user data */ });
+// ...
+```
+
+**Google Auth Callback (Token Generation & Redirection):**
+```javascript
+export const googleAuthCallback = async (req, res) => {
+    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+    try {
+        if (!req.user) {
+            return res.redirect(`${frontendUrl}/login?error=google_auth_failed`);
+        }
+        generateToken(req.user._id, res); // Using the utility function
+        res.redirect(frontendUrl);
+    } catch (error) { /* ... */ }
+};
+```
+
+**Update Profile (Cloudinary Integration & Username Update):**
+```javascript
+import cloudinary from "../lib/cloudinary.js"; // Importing the configured Cloudinary instance
+// ...
+export const updateProfile = async (req, res) => {
+    try {
+        const { profilePic, username } = req.body;
+        const userId = req.user._id;
+        let userToUpdate = await User.findById(userId);
+
+        // ... username validation and conflict checks ...
+
+        if (profilePic) {
+            const uploadResponse = await cloudinary.uploader.upload(profilePic); // Using Cloudinary for upload
+            fieldsToUpdate.profilePic = uploadResponse.secure_url;
+        }
+
+        // ... update user and generate new token ...
+        generateToken(updatedUser._id, res);
+        res.status(200).json(updatedUser);
+
+    } catch (error) { /* ... */ }
+};
+```
+
+[Source](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/controllers/auth.controller.js)
+
+### Authentication Flow (Google OAuth)
+
+The following sequence diagram illustrates the flow of a user authenticating via Google, involving the frontend, backend (with Passport.js), Google's authentication servers, and the database.
+
+````mermaid
+sequenceDiagram
+    actor User
+    participant Frontend
+    participant Backend (Passport.js)
+    participant Google Auth Server
+    participant MongoDB (User Model)
+
+    User->>Frontend: Clicks "Sign in with Google"
+    Frontend->>Backend (Passport.js): Initiates Google OAuth (/auth/google)
+    Backend (Passport.js)->>Google Auth Server: Redirects User for consent (client ID, scope, callback URL)
+    Google Auth Server->>User: Displays consent screen
+    User->>Google Auth Server: Grants consent
+    Google Auth Server->>Backend (Passport.js): Redirects to callbackURL with code
+    Backend (Passport.js)->>Google Auth Server: Exchanges code for access/refresh tokens and profile (server-to-server)
+    Google Auth Server-->>Backend (Passport.js): Returns tokens and profile
+    Backend (Passport.js)->>MongoDB (User Model): Search for user by googleId
+    alt User exists
+        MongoDB (User Model)-->>Backend (Passport.js): User data
+        Backend (Passport.js)->>Backend (Passport.js): `done(null, user)` (Passport success)
+    else User does not exist
+        Backend (Passport.js)->>MongoDB (User Model): Create new User (with googleId, email, username, authProvider)
+        MongoDB (User Model)-->>Backend (Passport.js): New user data
+        Backend (Passport.js)->>Backend (Passport.js): `done(null, newUser)` (Passport success)
+    end
+    Backend (Passport.js)->>Backend (Passport.js): Calls `googleAuthCallback`
+    Backend (Passport.js)->>Backend (Passport.js): `generateToken(user._id, res)` (sets JWT cookie)
+    Backend (Passport.js)->>Frontend: Redirects to frontend dashboard (e.g., `/`)
+    Frontend->>User: Displays authenticated view
+```
+
+Next: [Frontend Development](./3_frontend_development.mdx)

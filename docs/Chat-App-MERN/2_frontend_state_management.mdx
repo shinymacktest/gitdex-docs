@@ -1,66 +1,129 @@
 ---
 title: "Frontend State Management"
-description: "Details on Zustand stores for managing application state."
+description: "Details the Zustand stores used for managing chat application state and UI themes."
 ---
-# Frontend State Management
 
 <TOC />
 
-The application utilizes Zustand for efficient state management.  Two key stores are defined: `useChatStore` and `useThemeStore`.
+# Frontend State Management
 
-## `useChatStore`
+The frontend of this chat application leverages [Zustand](https://zustand-bear.github.io/blog/) for efficient and scalable state management. Zustand is a small, fast, and scalable bear-necessity state-management solution using simplified flux principles. This section details the two primary stores: `useChatStore` for core chat functionalities and `useThemeStore` for managing the application's UI theme.
 
-This store manages all aspects of the chat functionality, including:
+## Chat Application Store (`useChatStore`)
 
-* **Messages:**  An array of chat messages.
-* **Users:** A list of friends.
-* **Pending/Sent Requests:**  Lists of pending and sent friend requests.
-* **Selected User:**  The currently selected user for chat.
-* **Loading States:** Booleans indicating loading status for users and messages.
-* **Friend Box:**  State to control the visibility of the friend's list.
+The `useChatStore` is the central hub for all chat-related data and actions. It manages users, messages, friend requests, and interaction with the backend API and WebSockets.
 
-The store provides asynchronous actions for fetching friends, managing friend requests (sending, accepting, rejecting, removing), fetching messages, sending messages, and subscribing/unsubscribing to real-time message updates via a socket (implied from `useAuthStore.getState().socket`).
+[Source](https://github.com/shinymack/Chat-App-MERN/blob/main/frontend/src/store/useChatStore.js)
 
+### State Variables
+
+The store maintains several key pieces of state:
+
+-   `messages`: An array of messages for the currently selected chat.
+-   `users`: A list of the user's friends.
+-   `pendingRequests`: Friend requests received by the current user.
+-   `sentRequests`: Friend requests sent by the current user.
+-   `selectedUser`: The currently active user in the chat interface.
+-   `isUsersLoading`: Boolean indicating if the friends list is being fetched.
+-   `isMessagesLoading`: Boolean indicating if messages for a chat are being fetched.
+-   `isFriendBoxOpen`: Boolean controlling the visibility of the friend management UI.
+
+### Key Actions and API Interactions
+
+The `useChatStore` defines numerous asynchronous actions that interact with the backend API via `axiosInstance` and handle success/error feedback using `react-hot-toast`. It also integrates with `useAuthStore` to access the WebSocket connection.
+
+A high-level overview of the `useChatStore`'s responsibilities:
+
+````mermaid
+graph TD
+    subgraph Frontend State
+        A[useChatStore]
+    end
+
+    subgraph Backend API
+        B[Friends API]
+        C[Messages API]
+    end
+
+    subgraph External Services
+        D[WebSocket Service]
+    end
+
+    A -- "Calls getFriends()" --> B;
+    A -- "Calls sendFriendRequest(id)" --> B;
+    A -- "Calls acceptFriendRequest(id)" --> B;
+    A -- "Calls rejectFriendRequest(id)" --> B;
+    A -- "Calls removeFriend(id)" --> B;
+    A -- "Calls getMessages(userId)" --> C;
+    A -- "Calls sendMessage(data)" --> C;
+    A -- "Listens to 'newMessage'" -- D;
+    D -- "Emits 'newMessage' event" --> A;
+
+    style A fill:#bfdbfe
+    style B fill:#d8e2dc
+    style C fill:#d8e2dc
+    style D fill:#f8f9fa
+```
+*   **Friend Management**:
+    *   `getFriends()`: Fetches the list of all accepted friends.
+    *   `getPendingRequests()`: Retrieves friend requests awaiting the user's action.
+    *   `getSentRequests()`: Retrieves friend requests sent by the user that are awaiting a response.
+    *   `sendFriendRequest(identifier)`: Sends a new friend request.
+    *   `acceptFriendRequest(senderId)`: Accepts a pending friend request.
+    *   `rejectFriendRequest(senderId)`: Rejects a pending friend request.
+    *   `removeFriend(friendId)`: Removes an existing friend.
+
+    These actions often trigger a refresh of related lists (`getFriends()`, `getPendingRequests()`, `getSentRequests()`) to ensure the UI remains synchronized with the backend state.
+
+*   **Message Management**:
+    *   `getMessages(userId)`: Fetches the message history for a specific user.
+    *   `sendMessage(messageData)`: Sends a new message to the `selectedUser`. The new message is immediately appended to the local `messages` state.
+
+*   **WebSocket Integration**:
+    *   `subscribeToMessages()`: Registers a listener for the `newMessage` WebSocket event. This ensures that new messages received in real-time are added to the `messages` state if they are from the currently `selectedUser`. It accesses the `socket` instance from `useAuthStore`.
+    *   `unsubscribeFromMessages()`: Removes the `newMessage` listener, preventing memory leaks and unnecessary processing when the component unmounts or the chat context changes.
+
+*   **UI State**:
+    *   `toggleFriendsBox()`: Toggles the `isFriendBoxOpen` state.
+    *   `setSelectedUser(selectedUser)`: Sets the currently active user in the chat.
+
+Example of an action:
 ```javascript
-// Snippet from useChatStore.js
-getMessages: async (userId) => {
-    set({isMessagesLoading: true});
+getFriends: async () => {
+    set({isUsersLoading: true});
     try {
-        const res = await axiosInstance.get(`/messages/${userId}`);
-        set({messages: res.data});
+        const res = await axiosInstance.get("/friends/list");
+        set({ users: res.data});
     } catch (error) {
-        toast.error(error.response.data.message);
+        toast.error(error.response?.data?.message || "Failed to fetch friends");
     } finally {
-        set({isMessagesLoading: false});
+        set({ isUsersLoading: false});
     }
 },
 ```
 
-[Source](https://github.com/shinymack/Chat-App-MERN/blob/main/frontend/src/store/useChatStore.js)
+## Theme Management Store (`useThemeStore`)
 
-````mermaid
-graph TD
-    A[Component] --> B(useChatStore);
-    B --> C[API calls (axios)];
-    B --> D[State updates];
-    C --> E[Backend Server];
-    E --> F[Database];
-    style B fill:#a29bfe,stroke:#311b92,stroke-width:2px
-```
-
-
-## `useThemeStore`
-
-This simple store manages the application theme, persisting it in localStorage:
-
-```javascript
-// Snippet from useThemeStore.js
-setTheme: (theme) => {
-    localStorage.setItem("chat-theme", theme);
-    set({theme});
-}
-```
+The `useThemeStore` is a simpler Zustand store responsible for managing the application's UI theme.
 
 [Source](https://github.com/shinymack/Chat-App-MERN/blob/main/frontend/src/store/useThemeStore.js)
 
-Next: [3_frontend_styling.mdx]
+### State Variables
+
+-   `theme`: A string representing the currently active theme (e.g., "dark", "light"). This value is persisted in `localStorage`.
+
+### Key Actions
+
+-   `setTheme(theme)`: Updates the `theme` state and persists the new theme to `localStorage` under the key `"chat-theme"`. This ensures the user's theme preference is remembered across sessions.
+
+```javascript
+export const useThemeStore = create((set) => ({
+    theme: localStorage.getItem("chat-theme") || "dark",
+    setTheme: (theme) => {
+        localStorage.setItem("chat-theme", theme);
+        set({theme});
+    }
+}))
+```
+
+Next: [Frontend UI & Theming](3_frontend_ui_theming.mdx)

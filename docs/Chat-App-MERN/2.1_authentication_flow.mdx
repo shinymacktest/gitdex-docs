@@ -1,0 +1,152 @@
+---
+title: "Authentication Flow"
+description: "Details the user registration process, state management, and backend integration for authentication."
+---
+# Authentication Flow
+
+<TOC />
+
+The authentication system in the frontend leverages React for UI, Zustand for state management, and integrates with a backend API for user registration and session management. This section covers the `SignUpPage` component and the `useAuthStore` Zustand store.
+
+## 2.1.1 User Registration (`SignUpPage.jsx`)
+
+The `SignUpPage` component is responsible for handling new user registrations. It provides a user-friendly interface to collect username, email, and password.
+
+### Form Handling and Validation
+The page uses React's `useState` hook to manage form input data and local UI state, such as toggling password visibility. Client-side validation is performed before submitting the form to ensure basic data integrity (e.g., non-empty fields, valid email format, minimum password length).
+
+```javascript
+// From frontend/src/pages/SignUpPage.jsx
+const [formData, setFormData] = useState({
+  username: "",
+  email: "",
+  password: "",
+});
+
+const validateForm = () => {
+  if(!formData.username.trim()) return toast.error("Username is required");
+  // ... more validation ...
+  if (formData.password.length < 6) return toast.error("Password must be at least 6 characters");
+  return true;
+};
+
+const handleSubmit = (e) => {
+  e.preventDefault();
+  const success = validateForm();
+  if(success===true) signup(formData); // Calls signup from useAuthStore
+};
+```
+[Source: `frontend/src/pages/SignUpPage.jsx`](https://github.com/shinymack/Chat-App-MERN/blob/main/frontend/src/pages/SignUpPage.jsx)
+
+### Social Authentication (Google)
+In addition to traditional email/password registration, the `SignUpPage` also supports Google authentication. This is facilitated by linking to a backend Google OAuth route.
+
+```jsx
+// From frontend/src/pages/SignUpPage.jsx
+const backendDomain = import.meta.env.VITE_BACKEND_URL;
+const googleAuthUrl = `${backendDomain}/api/auth/google`;
+
+// ... inside render method
+<a
+  href={googleAuthUrl} // Link to your backend Google auth route
+  className="btn btn-primary btn-outline w-full"
+>
+  <FcGoogle className="size-5 mr-2" />
+  Sign up with Google
+</a>
+```
+[Source: `frontend/src/pages/SignUpPage.jsx`](https://github.com/shinymack/Chat-App-MERN/blob/main/frontend/src/pages/SignUpPage.jsx)
+
+## 2.1.2 Authentication State Management (`useAuthStore.js`)
+
+The `useAuthStore` is a Zustand store that centralizes all authentication-related state and logic. It manages the authenticated user (`authUser`), various loading states (`isSigningUp`, `isLoggingIn`), and even real-time online user data through WebSockets.
+
+### Key State Properties
+*   `authUser`: Stores the currently logged-in user object.
+*   `isSigningUp`, `isLoggingIn`, `isUpdatingProfile`, `isCheckingAuth`: Boolean flags to indicate ongoing async operations, useful for UI feedback (e.g., showing spinners).
+*   `onlineUsers`: An array of user IDs currently online, received via WebSockets.
+*   `socket`: The WebSocket connection instance.
+
+### Core Authentication Actions
+The store provides several asynchronous actions for interacting with the backend API:
+
+*   `checkAuth()`: Verifies if a user session exists on the server. If successful, it sets `authUser` and connects the WebSocket.
+*   `signup(data)`: Registers a new user by sending credentials to `/auth/signup`. On success, sets `authUser` and connects the WebSocket.
+*   `login(data)`: Authenticates an existing user by sending credentials to `/auth/login`. On success, sets `authUser` and connects the WebSocket.
+*   `logout()`: Clears the user session on the server and sets `authUser` to `null`. Disconnects the WebSocket.
+*   `updateProfile(data)`: Updates the authenticated user's profile information.
+
+```javascript
+// From frontend/src/store/useAuthStore.js
+export const useAuthStore = create((set, get) => ({
+    authUser: null,
+    isSigningUp: false,
+    // ... other state ...
+
+    signup: async (data) => {
+        set({ isSigningUp: true });
+        try {
+            const res = await axiosInstance.post("/auth/signup", data);
+            set({ authUser: res.data });
+            toast.success("Account created successfully");
+            get().connectSocket(); // Connects WebSocket after successful signup
+        } catch (error) {
+            toast.error(error.response.data.message);
+        } finally {
+            set({ isSigningUp: false });
+        }
+    },
+    // ... other actions like checkAuth, login, logout, updateProfile ...
+}));
+```
+[Source: `frontend/src/store/useAuthStore.js`](https://github.com/shinymack/Chat-App-MERN/blob/main/frontend/src/store/useAuthStore.js)
+
+### WebSocket Integration
+The `useAuthStore` also manages the WebSocket connection (`socket.io-client`). Upon successful authentication (login, signup, or `checkAuth`), the `connectSocket` action is called. This establishes a connection to the WebSocket server, passing the `userId` as a query parameter. The socket then listens for `getOnlineUsers` events to update the `onlineUsers` state.
+
+```javascript
+// From frontend/src/store/useAuthStore.js
+connectSocket: () => {
+    const { authUser } = get();
+    if(!authUser || get().socket?.connected) return;
+
+    const socket = io(BASE_URL, {
+        query: {
+            userId : authUser._id,
+        },
+    });
+    socket.connect();
+    set({socket: socket});
+
+    socket.on("getOnlineUsers", (userIds) => {
+        set({onlineUsers: userIds})
+    });
+},
+
+disconnectSocket : () => {
+    if(get().socket?.connected) get().socket.disconnect();
+}
+```
+[Source: `frontend/src/store/useAuthStore.js`](https://github.com/shinymack/Chat-App-MERN/blob/main/frontend/src/store/useAuthStore.js)
+
+## 2.1.3 Authentication Flow Diagram
+The following diagram illustrates the interaction between the `SignUpPage` component, `useAuthStore`, and the backend API during user registration.
+
+<!-- Fixed Mermaid syntax -->
+````mermaid
+graph TD
+    A[User] -- Enters Credentials --> B[SignUpPage Component]
+    B -- Calls signup(formData) --> C[useAuthStore (Zustand)]
+    C -- Sends POST /api/auth/signup --> D[Backend API (Express)]
+    D -- On Success: User Data & Session --> C
+    C -- Updates authUser State --> B
+    C -- Calls connectSocket() --> E[WebSocket Server]
+    E -- Emits "getOnlineUsers" --> C
+    C -- Updates onlineUsers State --> F[Other Components (e.g., Chat List)]
+    style B fill:#e0f2f7,stroke:#60a5fa
+    style C fill:#e0f7fa,stroke:#00bcd4
+    style D fill:#fbe9e7,stroke:#ff7043
+    style E fill:#fff3e0,stroke:#ffb74d
+```
+
+Next: [Settings and Theme Management](2.2_settings_and_theme.mdx)

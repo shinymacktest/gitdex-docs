@@ -1,0 +1,145 @@
+---
+title: "Chat Interface"
+description: "Detailed breakdown of the core chat message display and input components."
+---
+# Chat Interface
+
+<TOC />
+
+This section explores the fundamental components that make up the active chat window in the ShinyChat application. These components are responsible for displaying messages, providing real-time updates, and facilitating message input.
+
+## ChatContainer
+
+The `ChatContainer` component is the orchestrator of the main chat view. It's responsible for fetching and displaying messages for the currently selected user, handling real-time message subscriptions, and managing the auto-scrolling behavior to the latest messages.
+
+It integrates `ChatHeader` for displaying user information and `MessageInput` for composing and sending messages. It also utilizes global state from `useChatStore` and `useAuthStore` to manage chat-specific data and authentication details.
+
+### Key Features
+-   **Message Display**: Renders individual messages, distinguishing between sent and received messages based on `senderId`.
+-   **Real-time Updates**: Subscribes to and unsubscribes from message updates using `subscribeToMessages` and `unsubscribeFromMessages` from the chat store.
+-   **Auto-scrolling**: Uses a `useRef` hook (`messageEndRef`) and an `useEffect` to automatically scroll the chat view to the latest message.
+-   **Loading State**: Displays a `MessageSkeleton` when messages are being loaded, providing a better user experience.
+
+```jsx
+// Excerpt from ChatContainer.jsx
+import { useEffect } from "react";
+import { useChatStore } from "../store/useChatStore";
+import ChatHeader from "./ChatHeader";
+import MessageInput from "./MessageInput";
+import MessageSkeleton from "./skeletons/MessageSkeleton";
+import { useAuthStore } from "../store/useAuthStore";
+import { formatMessageTime } from "../lib/utils";
+import { useRef } from "react";
+
+const ChatContainer = () => {
+    const { messages, getMessages, isMessagesLoading, selectedUser, subscribeToMessages, unsubscribeFromMessages } =
+        useChatStore();
+    const { authUser } = useAuthStore();
+    const messageEndRef = useRef(null);
+
+    useEffect(() => {
+        getMessages(selectedUser._id);
+        subscribeToMessages();
+        return () => unsubscribeFromMessages();
+    }, [selectedUser._id, getMessages, subscribeToMessages, unsubscribeFromMessages]);
+    
+    // ... rendering logic
+};
+
+export default ChatContainer;
+```
+[Source: `frontend/src/components/ChatContainer.jsx`](https://github.com/shinymack/Chat-App-MERN/blob/main/frontend/src/components/ChatContainer.jsx)
+
+### Component Interaction
+The `ChatContainer` acts as a parent for `ChatHeader` and `MessageInput`, and depends on global state management for chat messages and authenticated user information.
+
+````mermaid
+graph TD
+    A[ChatContainer] --> B[ChatHeader]
+    A --> C[MessageInput]
+    A --> D[MessageSkeleton]
+    E[useChatStore] -- data flow --> A
+    F[useAuthStore] -- data flow --> A
+    E -.-> A: messages, selectedUser, subscribeToMessages
+    F -.-> A: authUser
+```
+
+## ChatHeader
+
+The `ChatHeader` component is displayed at the top of the `ChatContainer` and provides information about the currently selected chat partner.
+
+### Key Features
+-   **User Profile Display**: Shows the profile picture and username of the `selectedUser`.
+-   **Online Status**: Indicates whether the `selectedUser` is online or offline, by checking against `onlineUsers` from the authentication store.
+-   **Deselect User**: Provides a button (`<X />` icon) to deselect the current chat user, effectively closing the chat view by setting `selectedUser` to `null`.
+
+```jsx
+// Excerpt from ChatHeader.jsx
+import { X } from "lucide-react";
+import { useAuthStore } from "../store/useAuthStore";
+import { useChatStore } from "../store/useChatStore";
+
+const ChatHeader = () => {
+    const { onlineUsers } = useAuthStore();
+    const { selectedUser, setSelectedUser } = useChatStore();
+    return (
+        <div className="p-2.5 border-b border-base-300">
+            <div className="flex items-center justify-between">
+                {/* ... ProfilePic and UserInfo */}
+                <button onClick={() => {
+                    setSelectedUser(null);
+                }}> <X /> </button>
+            </div>
+        </div>
+    );
+};
+
+export default ChatHeader;
+```
+[Source: `frontend/src/components/ChatHeader.jsx`](https://github.com/shinymack/Chat-App-MERN/blob/main/frontend/src/components/ChatHeader.jsx)
+
+## MessageInput
+
+The `MessageInput` component provides the interface for users to compose and send messages, supporting both text and image attachments. It is integrated directly into the `ChatContainer`.
+
+### Key Features
+-   **Text Input**: A standard input field for typing messages.
+-   **Image Upload**: Allows users to select an image file, displays a preview, and includes an option to remove the selected image before sending.
+-   **Send Message Logic**: On submission, calls the `sendMessage` function from `useChatStore` with the message text and/or image data.
+-   **Input Clearing**: Resets the text input and image preview after a successful message send.
+
+```jsx
+// Excerpt from MessageInput.jsx
+import { useRef, useState } from "react";
+import { useChatStore } from "../store/useChatStore";
+import { Image, Send, X } from "lucide-react";
+
+const MessageInput = () => {
+    const [text, setText] = useState("");
+    const [imagePreview, setImagePreview] = useState(null);
+    const fileInputRef = useRef(null);
+    const { sendMessage } = useChatStore();
+
+    // ... handleImageChange, removeImage functions
+
+    const handleSendMessage = async (e) => {
+        e.preventDefault();
+        if (!text.trim() && !imagePreview) return;
+        try {
+            await sendMessage({ text: text.trim(), image: imagePreview });
+            setText("");
+            setImagePreview(null);
+            if (fileInputRef.current) fileInputRef.current = ""; // Clear file input
+        } catch (error) {
+            console.error("Failed to send message", error);
+        }
+    };
+
+    // ... rendering form with input and buttons
+};
+
+export default MessageInput;
+```
+[Source: `frontend/src/components/MessageInput.jsx`](https://github.com/shinymack/Chat-App-MERN/blob/main/frontend/src/components/MessageInput.jsx)
+
+Next: [User Interactions and Navigation](2.2_user_interactions.mdx)

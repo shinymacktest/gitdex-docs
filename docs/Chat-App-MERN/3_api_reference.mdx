@@ -1,0 +1,291 @@
+---
+title: "Backend API Reference"
+description: "A comprehensive guide to the messaging and friend management API endpoints of the Chat App backend."
+---
+<TOC />
+
+# Backend API Reference
+
+This section details the primary API endpoints for core application functionalities: messaging and friend management. These APIs are implemented using Express.js controllers and interact with MongoDB.
+
+## Messaging API
+
+The messaging API handles fetching user lists, retrieving chat histories, and sending new messages, including image uploads and real-time updates via WebSockets.
+
+### `getUsersForSidebar`
+
+*   **Endpoint**: `GET /api/messages/conversations` (implied by typical usage, though not explicitly shown in provided `index.js` routes, `getUsersForSidebar` is an exported controller function)
+*   **Controller**: `backend/src/controllers/message.controller.js`
+*   **Description**: Retrieves a list of all users registered in the system, excluding the currently logged-in user. This is typically used to populate a sidebar with potential chat partners.
+*   **Details**:
+    *   Requires authentication (user ID is taken from `req.user._id`).
+    *   Selects all user fields except `password`.
+    ```javascript
+    // backend/src/controllers/message.controller.js
+    export const getUsersForSidebar = async (req, res) => {
+        try {
+            const loggedInUserId = req.user._id;
+            const filteredUsers = await User.find({
+                _id: { $ne: loggedInUserId }}).select("-password");
+            res.status(200).json(filteredUsers);
+        } // ... error handling ...
+    };
+    ```
+    [Source: `backend/src/controllers/message.controller.js`](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/controllers/message.controller.js)
+
+### `getMessages`
+
+*   **Endpoint**: `GET /api/messages/:id` (where `:id` is the `userToChatId`)
+*   **Controller**: `backend/src/controllers/message.controller.js`
+*   **Description**: Fetches all messages between the currently logged-in user and a specified chat partner.
+*   **Details**:
+    *   Queries the `Message` model for documents where either `(senderId = myId AND receiverId = userToChatId)` or `(senderId = userToChatId AND receiverId = myId)`.
+    ```javascript
+    // backend/src/controllers/message.controller.js
+    export const getMessages = async (req, res) => {
+        try {
+            const {id : userToChatId } = req.params;
+            const myId = req.user._id;
+
+            const messages = await Message.find({
+                $or: [
+                    {senderId: myId, receiverId:userToChatId},
+                    {senderId: userToChatId, receiverId: myId}
+                ]
+            });
+            res.status(200).json(messages);
+        } // ... error handling ...
+    };
+    ```
+    [Source: `backend/src/controllers/message.controller.js`](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/controllers/message.controller.js)
+
+### `sendMessage`
+
+*   **Endpoint**: `POST /api/messages/:id` (where `:id` is the `receiverId`)
+*   **Controller**: `backend/src/controllers/message.controller.js`
+*   **Description**: Allows the authenticated user to send a new message, optionally with an image, to another user.
+*   **Details**:
+    *   If an `image` is provided in the request body, it's uploaded to Cloudinary, and the secure URL is stored.
+    *   A new `Message` document is created and saved to MongoDB.
+    *   Utilizes `socket.io` to emit a `"newMessage"` event to the receiver in real-time if they are online, ensuring instant delivery.
+    ```javascript
+    // backend/src/controllers/message.controller.js
+    export const sendMessage = async (req, res) => {
+        try {
+            const { text, image } = req.body;
+            const { id: receiverId } = req.params;
+            const senderId = req.user._id;
+
+            let imageUrl;
+            if (image) {
+                const uploadResponse = await cloudinary.uploader.upload(image);
+                imageUrl = uploadResponse.secure_url;
+            }
+            const newMessage = new Message({ senderId, receiverId, text, image: imageUrl });
+            await newMessage.save();
+
+            const receiverSocketId = getReceiverSocketId(receiverId);
+            if(receiverSocketId) {
+                io.to(receiverSocketId).emit("newMessage", newMessage);
+            }
+            res.status(201).json(newMessage);
+        } // ... error handling ...
+    };
+    ```
+    [Source: `backend/src/controllers/message.controller.js`](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/controllers/message.controller.js)
+    [Cloudinary Setup: `backend/src/lib/cloudinary.js`](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/lib/cloudinary.js)
+    [Socket.io Integration: `backend/src/lib/socket.js` (mentioned)](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/lib/socket.js)
+
+### Message Sending Flow
+
+````mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Backend Server (Express)
+    participant CL as Cloudinary
+    participant DB as MongoDB
+    participant WS as WebSocket (Socket.io)
+
+    C->>S: POST /api/messages/{receiverId} (text, image?)
+    alt Image provided
+        S->>CL: Upload image data
+        CL-->>S: Image URL (secure_url)
+    end
+    S->>DB: Save new Message document (senderId, receiverId, text, imageUrl?)
+    DB-->>S: Message saved (201 status)
+    S->>WS: Emit "newMessage" event to receiver's socketId
+    WS-->>C: Real-time update (if receiver online)
+    S-->>C: JSON response (new Message object)
+```
+<!-- Fixed Mermaid syntax -->
+
+## Friend Management API
+
+The friend management API handles the full lifecycle of friend requests and friend relationships between users.
+
+### `sendFriendRequest`
+
+*   **Endpoint**: `POST /api/friends/send-request`
+*   **Controller**: `backend/src/controllers/friend.controller.js`
+*   **Description**: Initiates a friend request from the authenticated user to another user, identified by username or email.
+*   **Details**:
+    *   Validates the `identifier` (username or email) and ensures the receiver exists.
+    *   Checks for various conditions to prevent duplicate or invalid requests (e.g., sending to self, already friends, request already sent/received).
+    *   Adds the receiver's ID to the sender's `sentRequests` array and the sender's ID to the receiver's `friendRequests` array.
+    ```javascript
+    // backend/src/controllers/friend.controller.js
+    export const sendFriendRequest = async (req, res) => {
+        try {
+            const { identifier } = req.body;
+            const senderId = req.user._id;
+            // ... (validation and checks) ...
+            sender.sentRequests.push(receiverId);
+            receiver.friendRequests.push(senderId);
+            await sender.save();
+            await receiver.save();
+            res.status(200).json({ message: "Friend request sent successfully." });
+        } // ... error handling ...
+    };
+    ```
+    [Source: `backend/src/controllers/friend.controller.js`](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/controllers/friend.controller.js)
+
+### `acceptFriendRequest`
+
+*   **Endpoint**: `PUT /api/friends/accept-request/:senderId`
+*   **Controller**: `backend/src/controllers/friend.controller.js`
+*   **Description**: Allows the authenticated user to accept a pending friend request from a specified sender.
+*   **Details**:
+    *   Verifies that the request exists in the receiver's `friendRequests` list.
+    *   Adds both users to each other's `friends` array.
+    *   Removes the request from both the receiver's `friendRequests` and the sender's `sentRequests`.
+    ```javascript
+    // backend/src/controllers/friend.controller.js
+    export const acceptFriendRequest = async (req, res) => {
+        try {
+            const { senderId } = req.params;
+            const receiverId = req.user._id;
+            // ... (user validation and request existence check) ...
+            receiver.friends.push(senderId);
+            sender.friends.push(receiverId);
+            receiver.friendRequests = receiver.friendRequests.filter(id => id.toString() !== senderId.toString());
+            sender.sentRequests = sender.sentRequests.filter(id => id.toString() !== receiverId.toString());
+            await receiver.save();
+            await sender.save();
+            res.status(200).json({ message: "Friend request accepted." });
+        } // ... error handling ...
+    };
+    ```
+    [Source: `backend/src/controllers/friend.controller.js`](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/controllers/friend.controller.js)
+
+### `rejectFriendRequest`
+
+*   **Endpoint**: `PUT /api/friends/reject-request/:senderId`
+*   **Controller**: `backend/src/controllers/friend.controller.js`
+*   **Description**: Allows the authenticated user to reject a pending friend request.
+*   **Details**:
+    *   Removes the request from the receiver's `friendRequests` and the sender's `sentRequests` arrays.
+    ```javascript
+    // backend/src/controllers/friend.controller.js
+    export const rejectFriendRequest = async (req, res) => {
+        try {
+            const { senderId } = req.params;
+            const receiverId = req.user._id;
+            // ... (user validation) ...
+            receiver.friendRequests = receiver.friendRequests.filter(id => id.toString() !== senderId.toString());
+            sender.sentRequests = sender.sentRequests.filter(id => id.toString() !== receiverId.toString());
+            // ... (check if request was actually removed) ...
+            await receiver.save();
+            await sender.save();
+            res.status(200).json({ message: "Friend request rejected." });
+        } // ... error handling ...
+    };
+    ```
+    [Source: `backend/src/controllers/friend.controller.js`](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/controllers/friend.controller.js)
+
+### `removeFriend`
+
+*   **Endpoint**: `DELETE /api/friends/:friendId`
+*   **Controller**: `backend/src/controllers/friend.controller.js`
+*   **Description**: Removes an existing friend from the authenticated user's friend list.
+*   **Details**:
+    *   Checks if the target user is actually in the current user's friends list.
+    *   Removes the friend from both users' `friends` arrays.
+    ```javascript
+    // backend/src/controllers/friend.controller.js
+    export const removeFriend = async (req, res) => {
+        try {
+            const { friendId } = req.params;
+            const userId = req.user._id;
+            // ... (user validation and friend check) ...
+            user.friends = user.friends.filter(id => id.toString() !== friendId.toString());
+            friendToRemove.friends = friendToRemove.friends.filter(id => id.toString() !== userId.toString());
+            await user.save();
+            await friendToRemove.save();
+            res.status(200).json({ message: "Friend removed successfully." });
+        } // ... error handling ...
+    };
+    ```
+    [Source: `backend/src/controllers/friend.controller.js`](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/controllers/friend.controller.js)
+
+### `getFriends`, `getPendingRequests`, `getSentRequests`
+
+*   **Endpoints**:
+    *   `GET /api/friends/` (for `getFriends`)
+    *   `GET /api/friends/pending` (for `getPendingRequests`)
+    *   `GET /api/friends/sent` (for `getSentRequests`)
+*   **Controller**: `backend/src/controllers/friend.controller.js`
+*   **Description**: Retrieve lists of current friends, incoming friend requests, or outgoing friend requests for the authenticated user.
+*   **Details**:
+    *   These controllers populate the respective arrays (`friends`, `friendRequests`, `sentRequests`) in the `User` model, selecting specific user fields (`username`, `email`, `profilePic`, `_id`) for display.
+    ```javascript
+    // backend/src/controllers/friend.controller.js - Example for getFriends
+    export const getFriends = async (req, res) => {
+        try {
+            const userId = req.user._id;
+            const user = await User.findById(userId).populate({
+                path: "friends",
+                select: "username email profilePic _id"
+            });
+            // ... (user validation) ...
+            res.status(200).json(user.friends);
+        } // ... error handling ...
+    };
+    ```
+    [Source: `backend/src/controllers/friend.controller.js`](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/controllers/friend.controller.js)
+
+### Friend Request Lifecycle
+
+````mermaid
+graph TD
+    A[User A] -->|1. Sends request to| B[User B]
+    subgraph Request Status
+        C[User A: sentRequests updated]
+        D[User B: friendRequests updated]
+    end
+    A -- adds A to --> D
+    B -- adds B to --> C
+
+    D -->|2a. User B accepts| E[Accept Request]
+    E --> F[User A & B are Friends]
+    subgraph Friends List
+        G[User A: friends updated]
+        H[User B: friends updated]
+    end
+    F -- adds B to --> G
+    F -- adds A to --> H
+    E -- removes A from --> D
+    E -- removes B from --> C
+
+    D -->|2b. User B rejects| I[Reject Request]
+    I -- removes A from --> D
+    I -- removes B from --> C
+    I --> J[Request Eliminated]
+
+    G, H -->|3. User A removes B| K[Remove Friend]
+    K -- removes B from --> G
+    K -- removes A from --> H
+    K --> L[No Longer Friends]
+```
+<!-- Fixed Mermaid syntax -->
+
+GLOBAL_TOC_PLACEHOLDER: 1. Backend Core & Setup, 2. Authentication with Google OAuth, 3. Backend API Reference

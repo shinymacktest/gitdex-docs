@@ -1,0 +1,245 @@
+```mdx
+---
+title: "State Management & Utilities"
+description: "Explains how global state is managed and common utility functions are used within the frontend."
+sidebar_position: 32
+---
+
+# State Management & Utilities
+
+<TOC />
+
+This section delves into how global state is managed and critical utility functions are employed within the frontend application. It covers authentication, chat-related state, network requests, and general helper functions, providing a foundational understanding of the client-side architecture.
+
+## Global State Management
+
+The application leverages [Zustand](https://zustand.pm/) for efficient and scalable state management. Zustand is a small, fast, and scalable bear-necessities state management solution, offering a simple API for creating and consuming stores. The state is compartmentalized into `useAuthStore` and `useChatStore` for clear separation of concerns, reflecting different domains within the application.
+
+### Authentication State (`useAuthStore`)
+
+The `useAuthStore` ([frontend/src/store/useAuthStore.js](https://github.com/shinymack/Chat-App-MERN/blob/main/frontend/src/store/useAuthStore.js)) manages all authentication-related state and actions, including user data, authentication status, and real-time connectivity via WebSockets.
+
+#### Key State Variables
+
+*   **`authUser`**: Stores the currently authenticated user's data. `null` if no user is logged in.
+*   **`isSigningUp`**, **`isLoggingIn`**, **`isUpdatingProfile`**, **`isCheckingAuth`**: Boolean flags indicating the loading status of respective asynchronous operations. This is crucial for UI feedback.
+*   **`onlineUsers`**: An array of user IDs representing currently online users, updated via WebSocket.
+*   **`socket`**: The WebSocket client instance, enabling real-time communication.
+
+#### Core Actions
+
+The store exposes several asynchronous actions to interact with the backend API and manage the authentication flow:
+
+*   **`checkAuth()`**: Verifies the current user's authentication status by making a GET request to `/auth/check`. If authenticated, sets `authUser` and initiates a WebSocket connection. This is typically called on application startup.
+*   **`signup(data)`**: Registers a new user. On success, sets `authUser` and connects the socket.
+*   **`login(data)`**: Authenticates an existing user. On success, sets `authUser` and connects the socket.
+*   **`logout()`**: Invalidates the user's session on the backend, clears `authUser` locally, and disconnects the socket.
+*   **`updateProfile(data)`**: Allows an authenticated user to update their profile information.
+*   **`connectSocket()`**: Establishes a WebSocket connection to the backend, passing the `userId` as a query parameter. It also subscribes to the `"getOnlineUsers"` event to update the `onlineUsers` state. This ensures that the socket connection is tied directly to the authenticated user's presence.
+*   **`disconnectSocket()`**: Closes the active WebSocket connection.
+
+This modular design, combined with `react-hot-toast` for user feedback, ensures a robust and user-friendly authentication experience.
+
+```javascript
+// frontend/src/store/useAuthStore.js#L14-L30
+export const useAuthStore = create((set, get) => ({
+    authUser: null,
+    isSigningUp: false,
+    isLoggingIn: false,
+    isUpdatingProfile: false,
+    isCheckingAuth: true,
+    onlineUsers: [],
+    socket: null,
+
+    checkAuth: async () => {
+        try {
+            const res = await axiosInstance.get("/auth/check");
+
+            set({ authUser: res.data });
+
+            get().connectSocket();
+        } catch (error) {
+            set({ authUser: null });
+            console.log("Error in checkAuth: ", error);
+        } finally {
+            set({ isCheckingAuth: false });
+        }
+    },
+    // ... other actions
+}));
+```
+
+#### Authentication and Socket Connection Flow
+
+The following diagram illustrates the lifecycle of authentication and real-time socket connection.
+
+
+
+
+
+```mermaid
+graph TD
+    A[App Startup] --> B{Is User Authenticated?};
+    B -- Yes --> C[Call checkAuth()];
+    B -- No --> D[Redirect to Login/Signup];
+    C --> E[axiosInstance.get("/auth/check")];
+    E -- Success (authUser data) --> F[set({authUser: data})];
+    F --> G[connectSocket()];
+    G --> H[Create Socket.IO instance];
+    H --> I[socket.connect()];
+    I --> J[socket.on("getOnlineUsers", ...) -> Update onlineUsers];
+    D --> K[User Logs In/Signs Up];
+    K --> L[Call login()/signup()];
+    L --> M[axiosInstance.post("/auth/login or /signup")];
+    M -- Success (authUser data) --> F;
+    F --> G;
+    N[User Logs Out] --> O[Call logout()];
+    O --> P[axiosInstance.post("/auth/logout")];
+    P --> Q[set({authUser: null})];
+    Q --> R[disconnectSocket()];
+    R --> S[socket.disconnect()];
+```
+
+
+
+### Chat State Management (`useChatStore`)
+
+The `useChatStore` ([frontend/src/store/useChatStore.js](https://github.com/shinymack/Chat-App-MERN/blob/main/frontend/src/store/useChatStore.js)) manages all chat-related data, including messages, user lists, friend requests, and selected chat partners.
+
+#### Key State Variables
+
+*   **`messages`**: An array storing the messages for the currently selected chat.
+*   **`users`**: A list of the user's friends.
+*   **`pendingRequests`**: An array of friend requests received by the current user.
+*   **`sentRequests`**: An array of friend requests sent by the current user.
+*   **`selectedUser`**: The user object of the currently active chat partner.
+*   **`isUsersLoading`**, **`isMessagesLoading`**: Boolean flags for loading states related to fetching users and messages.
+*   **`isFriendBoxOpen`**: A boolean to control the visibility of the friend management UI.
+
+#### Core Actions
+
+This store provides actions for fetching, sending, and managing chat-related data:
+
+*   **`toggleFriendsBox()`**: Toggles the `isFriendBoxOpen` state.
+*   **`getFriends()`**: Fetches the list of friends for the authenticated user.
+*   **`getPendingRequests()`**: Fetches pending friend requests.
+*   **`getSentRequests()`**: Fetches friend requests sent by the current user.
+*   **`sendFriendRequest(identifier)`**: Sends a friend request to another user.
+*   **`acceptFriendRequest(senderId)`**: Accepts a pending friend request, updating both friends and pending requests lists.
+*   **`rejectFriendRequest(senderId)`**: Rejects a pending friend request.
+*   **`removeFriend(friendId)`**: Removes a friend, updating the friends list and deselecting the user if they were the `selectedUser`.
+*   **`getMessages(userId)`**: Fetches chat messages for a specific `userId`.
+*   **`sendMessage(messageData)`**: Sends a new message to the `selectedUser`.
+*   **`subscribeToMessages()`**: Sets up a WebSocket listener for `"newMessage"` events. It checks if the incoming message is from the `selectedUser` and updates the `messages` state accordingly. This highlights the interaction between `useAuthStore`'s socket and `useChatStore`.
+*   **`unsubscribeFromMessages()`**: Removes the `"newMessage"` WebSocket listener to prevent memory leaks or incorrect state updates when a component unmounts or the selected user changes.
+*   **`setSelectedUser(selectedUser)`**: Sets the `selectedUser` for the active chat.
+
+The `useChatStore` effectively encapsulates all interactions related to messaging and friend management, utilizing `axiosInstance` for API calls and integrating with the `useAuthStore`'s `socket` for real-time message updates.
+
+```javascript
+// frontend/src/store/useChatStore.js#L84-L95
+    subscribeToMessages: () => {
+        const { selectedUser } = get();
+        if(!selectedUser) return;
+        
+        const socket = useAuthStore.getState().socket; // Accessing socket from auth store
+        socket.on("newMessage", (newMessage) => {
+            if(newMessage.senderId !== selectedUser._id) return
+            set({
+                messages: [...get().messages, newMessage]
+            })
+        })
+    },
+
+    unsubscribeFromMessages: () => {
+        const socket = useAuthStore.getState().socket;
+        socket.off("newMessage");
+    },
+```
+
+#### Chat Data Flow Diagram
+
+
+
+
+
+```mermaid
+graph TD
+    A[Chat Component] --> B{Select User};
+    B --> C[setSelectedUser(user)];
+    C --> D[getMessages(user.id)];
+    C --> E[subscribeToMessages()];
+    D --> F[axiosInstance.get("/messages/:userId")];
+    F -- Messages Data --> G[set({messages: data})];
+    E --> H[useAuthStore.socket.on("newMessage")];
+    H -- New Message Event --> I{Is senderId === selectedUser._id?};
+    I -- Yes --> J[set({messages: [...messages, newMessage]})];
+    K[User Sends Message] --> L[sendMessage(messageData)];
+    L --> M[axiosInstance.post("/messages/send/:userId", messageData)];
+    M -- Success --> N[set({messages: [...messages, newSentMessage]})];
+    O[Chat Component Unmounts/User Changes] --> P[unsubscribeFromMessages()];
+```
+
+
+
+## Network Utilities (`axiosInstance`)
+
+The `axiosInstance` ([frontend/src/lib/axios.js](https://github.com/shinymack/Chat-App-MERN/blob/main/frontend/src/lib/axios.js)) provides a pre-configured Axios instance for making HTTP requests to the backend API.
+
+```javascript
+// frontend/src/lib/axios.js#L3-L6
+import axios from "axios";
+
+export const axiosInstance = axios.create({
+    baseURL: import.meta.env.MODE == "development" ? "http://localhost:5001/api": "/api",
+    withCredentials: true,
+});
+```
+
+#### Design Choices
+
+*   **`baseURL`**: Dynamically set based on the `import.meta.env.MODE`. In `development` mode, it targets `http://localhost:5001/api` (the backend server). In `production`, it uses `/api`, relying on a proxy or direct host routing. This flexible configuration ensures seamless deployment across different environments.
+*   **`withCredentials: true`**: This is a critical setting for authenticating users. It instructs Axios to send HTTP cookies with cross-origin requests. This is necessary because the backend uses HTTP-only cookies for session management, preventing CSRF attacks and enhancing security by making the cookie inaccessible to client-side JavaScript.
+
+### Interaction with State Stores
+
+Both `useAuthStore` and `useChatStore` extensively utilize `axiosInstance` for all their backend API interactions, ensuring consistent request handling, base URL, and credential management. This centralizes network configuration and error handling (though specific error handling logic resides within each store's action).
+
+## General Utilities (`utils.js`)
+
+The `utils.js` file ([frontend/src/lib/utils.js](https://github.com/shinymack/Chat-App-MERN/blob/main/frontend/src/lib/utils.js)) currently contains a single, reusable utility function for formatting dates.
+
+```javascript
+// frontend/src/lib/utils.js#L1-L9
+export function formatMessageTime(date) {
+    return new Date(date).toLocaleTimeString("en-US", {
+        year: "numeric",
+        month: "short",
+        day:"2-digit",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: true,
+    });
+}
+```
+
+#### `formatMessageTime(date)`
+
+This function takes a date string or object and formats it into a human-readable time string, including year, month, day, hour, and minute, with AM/PM indication. This is particularly useful for displaying message timestamps consistently across the chat interface.
+
+#### Best Practices
+
+*   **Localization**: Using `toLocaleTimeString("en-US", ...)` ensures a standardized format, but could be extended to accept a locale parameter for multi-language support.
+*   **Pure Function**: It's a pure function, meaning it produces the same output for the same input and has no side effects, making it easy to test and reason about.
+
+## Key Insights and Best Practices
+
+*   **Separation of Concerns**: The clear distinction between `useAuthStore` and `useChatStore` demonstrates excellent separation of concerns, making the codebase more maintainable and easier to understand.
+*   **Zustand for Simplicity**: Zustand's minimalist approach keeps the state management overhead low while providing powerful features like `getState()` for accessing current state within actions.
+*   **Centralized Network Configuration**: The `axiosInstance` centralizes network base URL and credential settings, ensuring consistency and ease of modification.
+*   **Real-time Integration**: The integration of Socket.IO directly within `useAuthStore` for connection management and `useChatStore` for message subscription shows a thoughtful approach to real-time features, linking socket lifecycle to authentication status and chat activity.
+*   **Error Handling**: The consistent use of `try...catch` blocks with `toast.error` provides immediate and clear feedback to the user on API failures, improving user experience.
+*   **Loading States**: Explicit loading flags (`isSigningUp`, `isMessagesLoading`, etc.) are crucial for building responsive UIs that inform users about ongoing operations.
+
+Next: [Deployment & Configuration](./4_deployment_configuration.mdx)
+```

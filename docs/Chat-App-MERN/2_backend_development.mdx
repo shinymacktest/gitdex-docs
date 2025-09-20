@@ -1,0 +1,211 @@
+```mdx
+---
+title: "Backend Development"
+description: "Comprehensive guide to the backend architecture, technologies used, and core functionalities."
+sidebar_position: 2
+---
+
+# Backend Development
+<TOC />
+
+## Overview
+The backend serves as the core of the application, managing data, user authentication, real-time communication, and API services. It is built on a robust Node.js and Express.js framework, leveraging MongoDB for data persistence and Socket.IO for real-time interactions. This section details the architecture, key technologies, and the interaction between various components.
+
+### System Purpose
+The backend is designed to provide a scalable and secure foundation for a real-time communication application. Its primary responsibilities include:
+*   **User Management:** Handling user registration, login, and profile management.
+*   **Authentication & Authorization:** Securing API endpoints and ensuring authenticated access using various strategies including local and OAuth2.
+*   **Message Handling:** Storing, retrieving, and delivering messages between users in real-time.
+*   **Friend Management:** Managing friend requests and connections.
+*   **Real-time Communication:** Facilitating instant message delivery and status updates using WebSockets.
+*   **Media Storage:** Integration with cloud storage for media uploads.
+
+### Key Technologies
+
+| Category             | Technology            | Purpose                                                    |
+| :------------------- | :-------------------- | :--------------------------------------------------------- |
+| **Runtime**          | Node.js               | JavaScript runtime environment.                            |
+| **Web Framework**    | Express.js            | Fast, unopinionated, minimalist web framework.             |
+| **Database**         | MongoDB               | NoSQL database for flexible data storage.                  |
+| **ORM**              | Mongoose              | MongoDB object modeling for Node.js.                       |
+| **Authentication**   | `passport`, `passport-google-oauth20`, `jsonwebtoken`, `bcryptjs`, `express-session`, `cookie-parser` | Modular authentication middleware, Google OAuth2.0, JWT generation, password hashing, session management, and cookie parsing. |
+| **Real-time**        | Socket.IO             | Bidirectional low-latency communication for real-time features. |
+| **Environment Config** | `dotenv`              | Loading environment variables from `.env` files.           |
+| **Cloud Storage**    | `cloudinary`          | Cloud-based image and video management.                    |
+| **Development**      | `nodemon`             | Automatically restarts the Node.js application during development. |
+
+A comprehensive list of dependencies can be found in the [`backend/package.json`](./backend/package.json) file.
+
+## Backend Architecture
+
+The backend follows a layered architecture, separating concerns into routing, business logic (implied by route separation), and data access. The entry point is `index.js`, which sets up the server, middleware, and routes.
+
+
+
+
+
+```mermaid
+graph TD
+    A[Client] -->|HTTP/HTTPS| B[Express Server]
+    A -->|WebSocket| F[Socket.IO Server]
+    B --> C[Middleware (Auth, Cors, Session)]
+    C --> D[API Routes (Auth, Messages, Friends)]
+    D --> E[Controllers (Business Logic)]
+    E --> G[MongoDB (via Mongoose)]
+    F --> E
+    E --> H[Cloudinary (for media)]
+```
+
+
+
+*   **Client:** Interacts with the backend via HTTP/HTTPS for standard API calls and WebSockets for real-time communication.
+*   **Express Server:** The main application instance, handling incoming HTTP requests.
+*   **Middleware:** Processes requests before they reach the route handlers (e.g., authentication, CORS, session management).
+*   **API Routes:** Defines the endpoints for different functionalities (`/api/auth`, `/api/messages`, `/api/friends`).
+*   **Controllers:** Contains the business logic for each route, interacting with the database and other services.
+*   **MongoDB:** The primary data store for the application.
+*   **Socket.IO Server:** Manages real-time, bidirectional communication with clients.
+*   **Cloudinary:** Integrated for secure and efficient storage and delivery of media assets.
+
+## Server Setup and Configuration
+
+The backend server is initialized in [`backend/src/index.js`](./backend/src/index.js). This file is responsible for:
+1.  **Environment Configuration:** Loading environment variables.
+2.  **Database Connection:** Establishing a connection to MongoDB.
+3.  **Middleware Setup:** Configuring essential Express middleware.
+4.  **Route Definition:** Mapping API endpoints to specific route handlers.
+5.  **Real-time Communication:** Integrating Socket.IO.
+6.  **Server Listener:** Starting the Express server.
+
+### Environment Variables
+Environment variables are managed using `dotenv` for secure and flexible configuration. This includes sensitive information such as database URIs, session secrets, and API keys.
+
+```javascript title="backend/src/index.js - Environment Configuration"
+import dotenv from "dotenv";
+// ... other imports ...
+
+dotenv.config(); // Loads environment variables from .env file
+```
+[[backend/src/index.js#L14-L15](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/index.js#L14-L15)]
+
+### Database Connection
+The application connects to MongoDB using Mongoose. The `connectDB` function, defined in [`backend/src/lib/db.js`](./backend/src/lib/db.js), handles the connection logic. This ensures a robust and resilient connection to the database.
+
+```javascript title="backend/src/lib/db.js"
+import mongoose from "mongoose"
+
+export const connectDB = async () => {
+  try {
+    const conn = await mongoose.connect(process.env.MONGODB_URI);
+    console.log(`MongoDB connected:  ${conn.connection.host}`);
+  }
+  catch(error){
+    console.log("MongoDB connection error: ", error);
+  }
+}
+```
+[[backend/src/lib/db.js](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/lib/db.js)]
+
+**Best Practice:** Centralizing database connection logic in a dedicated module (e.g., `db.js`) promotes modularity and makes it easier to manage database-related configurations or switch database systems in the future.
+
+### Middleware Configuration
+Express middleware is crucial for processing requests, managing sessions, and handling authentication.
+
+```javascript title="backend/src/index.js - Middleware Setup"
+app.use(cookieParser());
+app.use(express.json({limit : '2mb'})); // Parses JSON request bodies with a size limit
+app.use(express.urlencoded({ limit: '2mb', extended: true })); // Parses URL-encoded request bodies
+app.use(cors({
+    origin: "http://localhost:5173", // Allows requests from the frontend origin
+    credentials: true, // Allows sending cookies across origins
+}));
+
+app.use(session({
+    secret: process.env.SESSION_SECRET,
+    resave: false,
+    saveUninitialized: false,
+    cookie: {
+        secure: process.env.NODE_ENV === "production", // true in production (HTTPS)
+        httpOnly: true,
+        maxAge: 7 * 24 * 60 * 60 * 1000
+        // sameSite: 'lax' // or 'none' if backend and frontend are on different domains in prod
+    }
+}));
+
+app.use(passport.initialize());
+app.use(passport.session());
+```
+[[backend/src/index.js#L18-L38](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/index.js#L18-L38)]
+
+*   **`cookieParser()`**: Parses cookies attached to the client request object.
+*   **`express.json()` and `express.urlencoded()`**: Parse incoming request bodies, essential for handling form data and JSON payloads from the client. The `limit` option prevents excessively large payloads.
+*   **`cors()`**: Enables Cross-Origin Resource Sharing, allowing the frontend (running on a different origin, e.g., `localhost:5173`) to make requests to the backend. `credentials: true` is vital for sending HTTP-only cookies.
+*   **`express-session`**: Manages user sessions. The `secret` is used to sign the session ID cookie, `secure` ensures the cookie is only sent over HTTPS in production, and `httpOnly` prevents client-side JavaScript access to the cookie.
+*   **`passport.initialize()` and `passport.session()`**: Integrate Passport.js for authentication. `passport.initialize()` sets up Passport, and `passport.session()` uses Express sessions to store user session data.
+
+### Route Definitions
+The backend organizes its API endpoints into modular route files, promoting better code organization and maintainability.
+
+```javascript title="backend/src/index.js - Route Definitions"
+import authRoutes from "./routes/auth.route.js";
+import messageRoutes from "./routes/message.route.js";
+import friendRoutes from "./routes/friend.route.js";
+// ...
+
+app.use("/api/auth", authRoutes );
+app.use("/api/messages", messageRoutes );
+app.use("/api/friends", friendRoutes);
+```
+[[backend/src/index.js#L3-L5](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/index.js#L3-L5), [backend/src/index.js#L40-L42](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/index.js#L40-L42)]
+
+*   **`/api/auth`**: Handles user authentication, registration, login, and logout.
+*   **`/api/messages`**: Manages sending, retrieving, and deleting messages.
+*   **`/api/friends`**: Manages friend relationships, requests, and listings.
+
+This approach adheres to the principle of **separation of concerns**, making the codebase easier to navigate and scale.
+
+### Production Static File Serving
+In a production environment, the backend also serves the static assets of the frontend application.
+
+```javascript title="backend/src/index.js - Production Static Serving"
+const __dirname = path.resolve(); // Resolves current directory
+// ...
+
+if(process.env.NODE_ENV === "production"){
+    app.use(express.static(path.join(__dirname, "../frontend/dist"))); // Serves static files from frontend build
+    
+    app.get("*" , (req, res) => {
+        res.sendFile(path.join(__dirname,"../frontend", "dist","index.html")); // Catch-all for frontend routing
+    })
+}
+```
+[[backend/src/index.js#L45-L51](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/index.js#L45-L51)]
+
+This configuration ensures that when the application is deployed, the Node.js server can efficiently deliver the compiled frontend assets, allowing for a single point of deployment for the full-stack application.
+
+## Real-time Communication with Socket.IO
+
+The application incorporates `socket.io` for real-time features, such as instant messaging and online status updates. The core Socket.IO server is initialized and exported from [`backend/src/lib/socket.js`](./backend/src/lib/socket.js) (implied by import).
+
+```javascript title="backend/src/index.js - Socket.IO Integration"
+import { app, server } from "./lib/socket.js";
+// ...
+
+server.listen(PORT, () => {
+    console.log("server is running on PORT: " + String(PORT));
+    connectDB(); // Connects to MongoDB once server starts
+});
+```
+[[backend/src/index.js#L12](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/index.js#L12), [backend/src/index.js#L53-L56](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/index.js#L53-L56)]
+
+By wrapping the Express `app` with the `http.Server` instance (`server`) and then listening on `server` instead of `app`, Socket.IO can coexist with Express on the same port, enabling both standard HTTP requests and WebSocket connections.
+
+## Key Insights and Best Practices
+
+*   **Modular Design:** The backend emphasizes modularity, with separate files for routes, database connection, and potentially other utilities (like `passport.config.js` and `socket.js`). This makes the codebase easier to understand, test, and maintain.
+*   **Security First:** The use of `bcryptjs` for password hashing, `jsonwebtoken` for token-based authentication (if used in specific routes, besides session-based), `express-session` with `httpOnly` and `secure` cookies, and `dotenv` for environment variables demonstrates a commitment to security.
+*   **Scalability:** By separating concerns and leveraging Express.js, the architecture provides a foundation that can be scaled horizontally by running multiple instances behind a load balancer. Socket.IO can also be scaled using Redis adapters.
+*   **Full-Stack Cohesion:** The backend is designed to seamlessly integrate with the frontend, handling CORS, sessions, and serving static assets for a unified deployment.
+
+Next: [Authentication & Authorization](./2.1_authentication_authorization.mdx)
+```

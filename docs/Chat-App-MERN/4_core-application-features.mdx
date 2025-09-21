@@ -1,0 +1,180 @@
+```mdx
+---
+title: "Core Application Features"
+description: "Detailed explanation of the chat application's key features."
+sidebar_position: 4
+---
+
+# Core Application Features
+
+<TOC />
+
+## System Purpose
+
+This chat application provides real-time text and image messaging between registered users.  Core functionalities include:
+
+*   **User Registration and Authentication:** Users can create accounts and securely log in to access the chat features. [View on GitHub](https://github.com/GitDex-AI/chat-app/blob/main/frontend/src/pages/SignUpPage.jsx) and [View on GitHub](https://github.com/GitDex-AI/chat-app/blob/main/frontend/src/pages/LoginPage.jsx)
+*   **Real-time Messaging:**  Users can send and receive messages instantly using Socket.IO. [View on GitHub](https://github.com/GitDex-AI/chat-app/blob/main/backend/src/controllers/message.controller.js)
+*   **Image Sharing:** Users can share images directly within the chat. [View on GitHub](https://github.com/GitDex-AI/chat-app/blob/main/frontend/src/components/MessageInput.jsx)
+*   **User Profiles:** Users can view their profile information and manage their settings. [View on GitHub](https://github.com/GitDex-AI/chat-app/blob/main/frontend/src/pages/ProfilePage.jsx) and [View on GitHub](https://github.com/GitDex-AI/chat-app/blob/main/frontend/src/pages/SettingsPage.jsx)
+*   **Contact List:** Users can see a list of online users to initiate chats. [View on GitHub](https://github.com/GitDex-AI/chat-app/blob/main/backend/src/controllers/message.controller.js)
+
+
+## System Architecture Overview
+
+The application follows a three-tier architecture: presentation (frontend), business logic (backend), and data (database).
+
+*   **Frontend (React):** Handles user interface, real-time updates via Socket.IO, and communication with the backend API.
+*   **Backend (Node.js with Express):** Manages user authentication, message routing, database interactions, and Socket.IO server.
+*   **Database (MongoDB):** Stores user data and chat messages.
+
+
+
+
+
+
+```mermaid
+graph TD
+  A[Frontend (React)] -->|API Calls| B(Backend (Node.js/Express))
+  B -->|Database Queries| C{MongoDB}
+  A -->|Real-time Communication| D((Socket.IO))
+```
+
+
+
+## Technology Stack
+
+| Layer      | Technology           | Version (Example) | Purpose                                      |
+| ---------- | --------------------- | ----------------- | -------------------------------------------- |
+| Frontend   | React                 | 18.2.0            | User interface and client-side logic          |
+| Frontend   | Lucide-React          | 0.244.0           | Icons                                         |
+| Frontend   | React Router DOM      | 6.14.1            | Routing                                        |
+| Backend    | Node.js               | 16.17.1           | Server-side runtime environment              |
+| Backend    | Express               | 4.18.2            | Web application framework                     |
+| Database   | MongoDB               | 6.0.1             | Data storage                                  |
+| Real-time  | Socket.IO             | 4.6.1             | Real-time bidirectional communication         |
+| Image Upload | Cloudinary           | -                  | Image storage and management                  |
+
+```json
+{
+  "dependencies": {
+    "react": "18.2.0",
+    "react-router-dom": "6.14.1",
+    "lucide-react": "0.244.0"
+  }
+}
+```
+
+```json
+{
+    "dependencies": {
+        "express": "4.18.2",
+        "socket.io": "4.6.1",
+        "mongoose": "7.0.3",
+        "cloudinary": "^1.34.0"
+    }
+}
+```
+
+
+## Core Application Features
+
+*   **Authentication:** The application uses JWT (JSON Web Tokens) for secure authentication.  Upon successful login, a token is issued and used for subsequent API requests.
+*   **Real-time Messaging with Socket.IO:** Socket.IO enables real-time, bidirectional communication between the client and server, ensuring immediate message delivery.  The `sendMessage` function in the backend controller handles message persistence and real-time broadcasting.
+
+```jsx
+// frontend/src/components/MessageInput.jsx#L47-L61
+```
+```jsx
+    const handleSendMessage = async (e) => {
+        e.preventDefault();
+        if (!text.trim() && !imagePreview) return;
+
+        try {
+            await sendMessage({
+                text: text.trim(),
+                image: imagePreview,
+            });
+
+            setText("");
+            setImagePreview(null);
+            if (fileInputRef.current) fileInputRef.current = "";
+        } catch (error) {
+            console.error("Failed to send message", error);
+        }
+    };
+```
+
+```javascript
+// backend/src/controllers/message.controller.js#L47-L71
+export const sendMessage = async (req, res) => {
+    try {
+        const { text, image } = req.body;
+        const { id: receiverId } = req.params;
+        const senderId = req.user._id;
+
+        let imageUrl;
+        if (image) {
+            const uploadResponse = await cloudinary.uploader.upload(image);
+
+            imageUrl = uploadResponse.secure_url;
+        }
+        const newMessage = new Message({
+            senderId,
+            receiverId,
+            text,
+            image: imageUrl,
+        });
+
+        await newMessage.save();
+
+        const receiverSocketId = getReceiverSocketId(receiverId);
+
+        if(receiverSocketId) {
+            io.to(receiverSocketId).emit("newMessage", newMessage);
+        }
+
+
+        res.status(201).json(newMessage);   
+        
+    } catch (error) {
+        console.log("Error in sendMessage controller:  ", error);
+        res.status(500).json({ error: "Internal Server Error" });
+    }
+};
+```
+
+*   **Media Sharing:**  The application supports image sharing.  Images are uploaded to Cloudinary for storage and the URL is stored in the database.
+
+
+
+
+
+```mermaid
+flowchart LR
+    A[User Sends Message] --> B{Message Contains Image?}
+    B -- Yes --> C[Upload to Cloudinary]
+    C --> D[Save Message (with URL) to DB]
+    B -- No --> D
+    D --> E[Broadcast via Socket.IO]
+    E --> F[Update UI]
+
+```
+
+
+
+## Key Integration Points
+
+*   **State Management:** The frontend utilizes Zustand for efficient state management, particularly for handling user authentication and chat messages.
+*   **API Flows:** The frontend interacts with the backend via RESTful API calls using `fetch` or `axios`. The backend uses Express.js for API routing and handling requests.
+*   **Authentication:** JWT (JSON Web Tokens) are used for user authentication, ensuring secure access to protected resources.  The backend verifies tokens for each request.
+*   **Database Interactions:**  Mongoose is used for database interaction with MongoDB. The backend controllers manage data persistence for users and messages.
+
+Best Practices:
+
+*   **Separation of Concerns:**  The application strictly separates frontend and backend responsibilities, enhancing maintainability and scalability.
+*   **Scalability:** Socket.IO's real-time capabilities provide a scalable solution for handling multiple concurrent users and messages.
+
+
+Next: [Project Structure](./5_project-structure.mdx)
+```

@@ -1,0 +1,317 @@
+---
+title: "Client-Side State Management"
+description: "Explains how global state for authentication, chat, and theme is managed using Zustand stores."
+sidebar_position: 32
+---
+
+# Client-Side State Management
+<TOC />
+
+Client-side state management is a critical component of modern web applications, ensuring a responsive and consistent user experience. In this chat application, global state for authentication, real-time chat functionalities, and user interface theming is efficiently managed using [Zustand](https://zustand.pm/), a small, fast, and scalable state-management solution. Zustand's simplicity and hook-based API make it an ideal choice for managing distinct yet interconnected domains of application state.
+
+## Zustand Stores Overview
+Zustand is a lightweight, bare-bones state-management library that leverages React Hooks. Its primary advantages include:
+*   **Simplicity**: Minimal boilerplate, making it easy to define and consume stores.
+*   **Performance**: Rerenders only components that use updated state, optimizing performance.
+*   **Flexibility**: Supports middleware and integrates seamlessly with various React ecosystems.
+*   **Scalability**: Suitable for both small and large applications, allowing state to be organized into multiple, focused stores.
+
+This application utilizes three primary Zustand stores:
+*   `useAuthStore`: Manages user authentication status, profiles, and WebSocket connection.
+*   `useChatStore`: Handles chat messages, friend lists, and friend requests.
+*   `useThemeStore`: Controls the application's UI theme preferences.
+
+## Authentication Store (`useAuthStore`)
+The `useAuthStore` is responsible for maintaining the authentication state of the user, handling login, signup, logout processes, and managing the WebSocket connection for real-time features like online user presence.
+
+### System Purpose
+The `useAuthStore` serves as the single source of truth for all authentication-related data and actions:
+*   **User Session Management**: Stores the authenticated user's data (`authUser`).
+*   **Authentication Flow Control**: Manages loading states (`isSigningUp`, `isLoggingIn`, `isCheckingAuth`) during API calls.
+*   **Profile Updates**: Facilitates updating the authenticated user's profile information.
+*   **Real-time Connectivity**: Establishes and manages the WebSocket connection (`socket`) for real-time features.
+*   **Online Users Tracking**: Keeps track of `onlineUsers` received via the WebSocket.
+
+### Core Functionalities
+The store provides a suite of asynchronous actions to interact with the backend authentication API and manage the WebSocket lifecycle:
+*   **`checkAuth()`**: Verifies the user's authentication status upon application load.
+*   **`signup(data)`**: Registers a new user with the provided credentials.
+*   **`login(data)`**: Authenticates an existing user.
+*   **`logout()`**: Invalidates the user's session.
+*   **`updateProfile(data)`**: Modifies the authenticated user's profile.
+*   **`connectSocket()`**: Initializes and connects the WebSocket to the server, registering the user for real-time events.
+*   **`disconnectSocket()`**: Closes the WebSocket connection, typically on logout.
+
+This snippet illustrates the initial setup of the `useAuthStore`, defining its initial state and the `checkAuth` action, which is crucial for verifying user sessions on application load. It highlights the use of `axiosInstance` for API calls and the subsequent call to `connectSocket` if authentication is successful.
+
+```javascript
+// frontend/src/store/useAuthStore.js
+import { create } from "zustand";
+import { axiosInstance } from "../lib/axios";
+import toast from "react-hot-toast";
+import { io } from "socket.io-client";
+
+const BASE_URL = import.meta.env.MODE == "development" ? "http://localhost:5001": "/";
+
+export const useAuthStore = create((set, get) => ({
+    authUser: null,
+    isSigningUp: false,
+    isLoggingIn: false,
+    isUpdatingProfile: false,
+    isCheckingAuth: true,
+    onlineUsers: [],
+    socket: null,
+
+    checkAuth: async () => {
+        try {
+            const res = await axiosInstance.get("/auth/check");
+            set({ authUser: res.data });
+            get().connectSocket(); // Connect socket if auth successful
+        } catch (error) {
+            set({ authUser: null });
+            console.log("Error in checkAuth: ", error);
+        } finally {
+            set({ isCheckingAuth: false });
+        }
+    },
+    // ... other actions
+}));
+```
+[View on GitHub#L1-L29](https://github.com/shinymack/Chat-App-MERN/blob/main/frontend/src/store/useAuthStore.js#L1-L29)
+
+### WebSocket Integration
+The `connectSocket` action is pivotal for enabling real-time communication. It initializes a Socket.IO client, passing the authenticated user's ID as a query parameter. This ID allows the server to associate the socket connection with a specific user. The socket then listens for events like `getOnlineUsers` to update the list of active users.
+
+```javascript
+// frontend/src/store/useAuthStore.js
+// ... (previous code)
+    connectSocket: () => {
+        const { authUser } = get();
+        if(!authUser || get().socket?.connected) return;
+
+        const socket = io(BASE_URL, {
+            query: {
+                userId : authUser._id, // Attach user ID for server identification
+            },
+        });
+        socket.connect();
+        set({socket: socket});
+
+        socket.on("getOnlineUsers", (userIds) => {
+            set({onlineUsers: userIds}) // Update online users state
+        }); 
+
+    },
+
+    disconnectSocket : () => {
+        if(get().socket?.connected) get().socket.disconnect();
+    }
+// ... (rest of the store)
+```
+[View on GitHub#L90-L106](https://github.com/shinymack/Chat-App-MERN/blob/main/frontend/src/store/useAuthStore.js#L90-L106)
+
+### Authentication Flow
+The authentication process orchestrates interactions between user actions, the `useAuthStore`, backend APIs, and WebSocket services.
+
+
+
+```mermaid
+flowchart LR
+    A[User Action: Login/Signup] --> B{Call useAuthStore.login() / .signup()};
+    B --> C[Set isLoggingIn/isSigningUp = true];
+    C --> D[axiosInstance.post(/auth/login / /auth/signup)];
+    D --> E(Backend API Server);
+    E -- Success --> F[Set authUser state];
+    E -- Error --> G[Show Toast Error];
+    F --> H[Call useAuthStore.connectSocket()];
+    H --> I(WebSocket Server);
+    I -- "on 'getOnlineUsers'" --> J[Update onlineUsers state];
+    F, G, J --> K[Set isLoggingIn/isSigningUp = false];
+```
+
+
+
+## Chat Store (`useChatStore`)
+The `useChatStore` manages all state and logic related to messaging, friend management, and chat interactions. It works in conjunction with `useAuthStore` for real-time updates.
+
+### System Purpose
+The `useChatStore` provides a comprehensive solution for managing chat-specific data:
+*   **Message History**: Stores and retrieves `messages` for selected conversations.
+*   **User & Friend Lists**: Manages the `users` array (friends), `pendingRequests`, and `sentRequests`.
+*   **Active Conversation**: Tracks the `selectedUser` for the current chat.
+*   **Loading Indicators**: Provides `isUsersLoading` and `isMessagesLoading` for UI feedback.
+*   **Friend Request Management**: Offers actions to send, accept, reject, and remove friend relationships.
+
+### Core Functionalities
+The store exposes methods for various chat operations:
+*   **`getFriends()`**: Fetches the list of the authenticated user's friends.
+*   **`getPendingRequests()` / `getSentRequests()`**: Retrieves incoming and outgoing friend requests.
+*   **`sendFriendRequest(identifier)`**: Initiates a new friend request.
+*   **`acceptFriendRequest(senderId)` / `rejectFriendRequest(senderId)`**: Responds to a friend request.
+*   **`removeFriend(friendId)`**: Deletes an existing friend relationship.
+*   **`getMessages(userId)`**: Loads message history for a specific user.
+*   **`sendMessage(messageData)`**: Sends a new message to the `selectedUser`.
+*   **`subscribeToMessages()` / `unsubscribeFromMessages()`**: Sets up and tears down WebSocket listeners for new messages.
+*   **`setSelectedUser(user)`**: Sets the currently active chat partner.
+
+This snippet shows the definition of `useChatStore` with its initial state, `axiosInstance` for fetching friends, and the crucial `sendMessage` and `subscribeToMessages` functions. `sendMessage` updates the local message state optimistically, while `subscribeToMessages` listens for new messages via the `useAuthStore`'s socket.
+
+```javascript
+// frontend/src/store/useChatStore.js
+import toast from "react-hot-toast";
+import { create } from "zustand";
+import { axiosInstance } from "../lib/axios";
+import { useAuthStore } from "./useAuthStore";
+
+export const useChatStore = create((set, get) => ({
+    messages:[],
+    users: [],
+    pendingRequests: [],
+    sentRequests: [],
+    selectedUser: null,
+    isUsersLoading: false,
+    isMessagesLoading: false,
+    isFriendBoxOpen: false,
+
+    toggleFriendsBox: () => set(state => ({ isFriendsBoxOpen: !state.isFriendsBoxOpen })),
+
+    getFriends: async () => {
+        set({isUsersLoading: true});
+        try {
+            const res = await axiosInstance.get("/friends/list");
+            set({ users: res.data});
+        } catch (error) {
+            toast.error(error.response?.data?.message || "Failed to fetch friends");
+        } finally {
+            set({ isUsersLoading: false});
+        }
+    },
+    // ... other friend management actions
+
+    sendMessage: async (messageData) => {
+        const {selectedUser, messages} = get();
+        try {
+            const res = await axiosInstance.post(`/messages/send/${selectedUser._id}`, messageData);
+            set({messages : [...messages, res.data]}); // Optimistic update
+        } catch (error){
+            toast.error(error.response.data.message);
+        }
+
+    },
+
+    subscribeToMessages: () => {
+        const { selectedUser } = get();
+        if(!selectedUser) return;
+        
+        const socket = useAuthStore.getState().socket; // Access socket from auth store
+        socket.on("newMessage", (newMessage) => {
+            if(newMessage.senderId !== selectedUser._id) return // Only add if it's for the current chat
+            set({
+                messages: [...get().messages, newMessage]
+            })
+        })
+    },
+
+    unsubscribeFromMessages: () => {
+        const socket = useAuthStore.getState().socket;
+        socket.off("newMessage");
+    },
+    
+    setSelectedUser: (selectedUser) => set({selectedUser})
+
+}))
+```
+[View on GitHub#L1-L109](https://github.com/shinymack/Chat-App-MERN/blob/main/frontend/src/store/useChatStore.js#L1-L109)
+
+## Theme Store (`useThemeStore`)
+The `useThemeStore` is a simple Zustand store dedicated to managing the application's visual theme, providing persistence across sessions using `localStorage`.
+
+### System Purpose
+*   **Theme Management**: Stores the current theme setting (`"dark"` or `"light"`).
+*   **Persistence**: Saves the user's theme preference to `localStorage` so it persists across browser sessions.
+
+### Core Functionalities
+*   **`setTheme(theme)`**: Updates the current theme and saves it to `localStorage`.
+
+This small store effectively encapsulates theme-related logic, making it easy to toggle between themes and remember user preferences.
+
+```javascript
+// frontend/src/store/useThemeStore.js
+import { create } from "zustand";
+
+export const useThemeStore = create((set) => ({
+    theme: localStorage.getItem("chat-theme") || "dark", // Initialize from localStorage or default to "dark"
+    setTheme: (theme) => {
+        localStorage.setItem("chat-theme", theme); // Persist theme to localStorage
+        set({theme});
+    }
+}))
+```
+[View on GitHub#L1-L7](https://github.com/shinymack/Chat-App-MERN/blob/main/frontend/src/store/useThemeStore.js#L1-L7)
+
+## API Integration (`axiosInstance`)
+All interactions with the backend API are facilitated through a pre-configured Axios instance, `axiosInstance`. This centralized configuration ensures consistency and handles common API requirements such as base URL, credentials, and error handling.
+
+### Configuration Details
+*   **`baseURL`**: Dynamically set based on the `NODE_ENV` to point to either the local development server (`http://localhost:5001/api`) or the relative `/api` endpoint in production.
+*   **`withCredentials`**: Set to `true` to ensure that cookies (which store the session token for authentication) are sent with every request, enabling secure, stateful API interactions.
+
+```javascript
+// frontend/src/lib/axios.js
+import axios from "axios";
+
+export const axiosInstance = axios.create({
+    baseURL: import.meta.env.MODE == "development" ? "http://localhost:5001/api": "/api", // Dynamic base URL
+    withCredentials: true, // Ensures cookies are sent with requests
+});
+```
+[View on GitHub#L1-L6](https://github.com/shinymack/Chat-App-MERN/blob/main/frontend/src/lib/axios.js#L1-L6)
+
+## Key Integration Points
+The client-side state management system is designed for modularity yet features critical integration points that ensure a cohesive user experience:
+
+*   **Authentication and Real-time**: The `useAuthStore` is the gateway for real-time features. Successful authentication triggers `connectSocket()`, establishing the WebSocket. This `socket` instance is then accessed by `useChatStore` to subscribe to `newMessage` events, demonstrating a clean dependency where `useChatStore` relies on `useAuthStore` for its real-time channel without directly managing the socket lifecycle.
+*   **API Interaction Consistency**: `axiosInstance` is universally used across `useAuthStore` and `useChatStore` for all HTTP requests, centralizing API communication and ensuring `withCredentials` is always applied for authentication.
+*   **User Experience Feedback**: `react-hot-toast` is integrated into all stores to provide immediate feedback for asynchronous operations (success, error messages), enhancing the user experience. Loading states (e.g., `isSigningUp`, `isUsersLoading`) are diligently managed within each store to provide appropriate UI indicators.
+*   **Scalability and Maintainability**: By separating concerns into distinct Zustand stores, the application achieves a high degree of modularity. This makes individual features easier to develop, test, and maintain. For example, the theme management is entirely decoupled from authentication and chat logic, allowing independent updates.
+
+### Client-Side Architecture Overview
+This diagram illustrates the high-level architecture of how client-side components interact with the Zustand stores, the backend API, and the WebSocket server.
+
+
+
+```mermaid
+graph TD
+    UI[User Interface (React Components)];
+    A[useAuthStore];
+    C[useChatStore];
+    T[useThemeStore];
+    AX[axiosInstance];
+    WS[WebSocket Server];
+    BAPI[Backend API Server];
+    DB[Database];
+
+    UI --> A;
+    UI --> C;
+    UI --> T;
+
+    A -- "Auth Status & Socket" --> UI;
+    C -- "Chat Data" --> UI;
+    T -- "Theme Preference" --> UI;
+
+    A -- "HTTP Requests (Auth)" --> AX;
+    C -- "HTTP Requests (Chat)" --> AX;
+    AX --> BAPI;
+
+    A -- "Connect/Disconnect Socket" --> WS;
+    C -- "Subscribe to Messages" --> WS;
+    WS -- "Real-time Updates" --> UI;
+
+    BAPI -- "Data Persistence" --> DB;
+```
+
+
+
+This state management strategy leverages Zustand's simplicity and React's component-based nature to build a robust and responsive chat application. Each store is focused on a specific domain, fostering clear separation of concerns and making the application's global state manageable and predictable.
+
+Next: [Pages and Routing](./3.3_pages-and-routing.mdx)

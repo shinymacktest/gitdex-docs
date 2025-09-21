@@ -1,0 +1,185 @@
+---
+title: "Backend Development"
+description: "Details on the server-side implementation using Node.js, Express, and MongoDB."
+sidebar_position: 2  # For sidebar ordering
+---
+
+# Backend Development
+
+<TOC />
+
+## System Purpose
+
+This document details the backend implementation of a chat application using Node.js, Express.js, MongoDB, and Socket.IO.  The system is designed to handle user authentication, friend management, messaging, and real-time communication.  Key considerations during development included scalability, security, and maintainability.
+
+### Key Features
+
+*   **User Authentication:** Secure user registration and login via email and Google OAuth 2.0.
+*   **Friend Management:**  Adding, removing, and managing friend requests.
+*   **Real-time Messaging:**  Instant message delivery using Socket.IO.
+*   **Profile Management:**  Users can update their profiles.
+*   **Data Persistence:** User data and messages are stored in a MongoDB database.
+
+### Technology Stack
+
+| Component       | Technology     | Version      | Notes                                   |
+|-----------------|-----------------|---------------|----------------------------------------|
+| Backend         | Node.js        | (see `package.json`) | Server-side JavaScript runtime           |
+| Framework       | Express.js      | (see `package.json`) | Web application framework                 |
+| Database        | MongoDB        | (see `package.json`) | NoSQL document database                   |
+| Authentication | Passport.js     | (see `package.json`) | Authentication middleware                 |
+| OAuth           | Passport-Google-OAuth20 | (see `package.json`) | Google OAuth 2.0 strategy               |
+| Real-time       | Socket.IO       | (see `package.json`) | Real-time bidirectional communication    |
+| Encryption      | bcryptjs        | (see `package.json`) | Password hashing                          |
+| Session Management | express-session | (see `package.json`) | Manages user sessions                    |
+| Environment Variables | dotenv | (see `package.json`) | Securely manages environment variables  |
+
+
+## System Architecture
+
+
+
+
+
+```mermaid
+graph TD
+    A[Frontend (Client)] -->|HTTP Requests| B(Express.js Server);
+    B -->|API Calls| C(Auth Controller);
+    B -->|API Calls| D(Message Controller);
+    B -->|API Calls| E(Friend Controller);
+    B -->|Socket.IO| F(Socket.IO Server);
+    B -->|Database Interactions| G(MongoDB);
+    F --> A;
+    subgraph "Backend"
+    B; C; D; E; F; G;
+    end
+```
+
+
+
+This diagram illustrates the flow of communication between the frontend client, the Express.js server, and the MongoDB database.  Socket.IO is used for real-time communication, enhancing the user experience.  The controllers (`Auth`, `Message`, and `Friend`) handle routing and business logic.
+
+## Code Snippets and Explanations
+
+### 1. Server Initialization ([`backend/src/index.js`](https://github.com/your-repo/backend/blob/main/src/index.js#L1-L40))
+
+```javascript
+import express from "express";
+import cors from "cors";
+import authRoutes from "./routes/auth.route.js";
+// ... other imports
+
+const app = express();
+
+app.use(express.json({limit : '2mb'}));
+app.use(express.urlencoded({ limit: '2mb', extended: true }));
+app.use(cors({
+    origin: "http://localhost:5173",
+    credentials: true,
+}));
+
+app.use(session({
+    secret: process.env.SESSION_SECRET, 
+    resave: false,
+    saveUninitialized: false, 
+    cookie: {
+        secure: process.env.NODE_ENV === "production", 
+        httpOnly: true,
+        maxAge: 7 * 24 * 60 * 60 * 1000 
+    }
+}));
+
+
+app.use(passport.initialize());
+app.use(passport.session());  
+
+app.use("/api/auth", authRoutes );
+// ... other route uses
+```
+
+This snippet shows the server setup, including middleware for handling JSON and URL-encoded bodies, CORS, sessions, and Passport.js for authentication.  The `cors` middleware is configured to allow requests from a specific origin (`http://localhost:5173`), crucial for securing communication between the frontend and backend.  Session management is essential for maintaining user state between requests. Note that `secure: process.env.NODE_ENV === "production"` ensures secure cookies are used in production.
+
+### 2. User Model ([`backend/src/models/user.model.js`](https://github.com/your-repo/backend/blob/main/src/models/user.model.js#L1-L70))
+
+```javascript
+import mongoose from "mongoose"
+
+const  userSchema = new mongoose.Schema(
+    {
+        email: { 
+            type: String,
+            required: true,
+            unique: true
+        },
+        username: {
+            type: String,
+            required: true,
+            unique: true,
+            // ... other validation rules
+        },
+        password: {
+            type: String,
+            minlength: 6,
+        },
+        // ... other fields
+        friends: [{
+            type: mongoose.Schema.Types.ObjectId,
+            ref: "User",
+            default: [] 
+        }],
+        // ... other fields
+    },
+    { 
+        timestamps: true
+    } 
+);
+
+// ... pre-save hook
+
+const User = mongoose.model("User", userSchema);
+
+export default User;
+```
+
+This code defines the Mongoose schema for the `User` model.  It includes fields for email, username, password, profile picture, friends, and friend requests. Data validation is implemented to ensure data integrity.  The `timestamps` option automatically adds createdAt and updatedAt fields. The pre-save hook handles password management for different authentication methods.
+
+### 3. Authentication Routes ([`backend/src/routes/auth.route.js`](https://github.com/your-repo/backend/blob/main/src/routes/auth.route.js#L1-L35))
+
+```javascript
+import express from "express"
+import passport from 'passport';
+import { login, logout, signup, updateProfile, checkAuth, googleAuthCallback, checkUsernameAvailability} from  "../controllers/auth.controller.js"
+import { protectRoute } from "../middleware/auth.middleware.js"
+const router = express.Router();
+
+router.post("/signup", signup);
+router.post("/login", login);
+router.post("/logout", logout);
+router.put("/update-profile", protectRoute ,updateProfile)
+router.get("/username/check/:username", protectRoute, checkUsernameAvailability);
+router.get("/check", protectRoute, checkAuth)
+
+router.get(
+    '/google',
+    passport.authenticate('google', { scope: ['profile', 'email'] })
+);
+router.get(
+    '/google/callback',
+    passport.authenticate('google', {
+        failureRedirect: 'http://localhost:5173/login', 
+        failureMessage: true 
+    }),
+    googleAuthCallback 
+);
+export default router;
+```
+
+This defines the Express.js routes for authentication, including signup, login, logout, profile updates, and Google OAuth 2.0 authentication. The `protectRoute` middleware ensures that protected routes are only accessible to authenticated users.
+
+
+## Key Integration Points and Insights
+
+The backend seamlessly integrates with the frontend through API calls and real-time communication via Socket.IO.  Security best practices, such as secure cookie handling and password hashing, are employed throughout the application.  The modular design, using separate controllers and middleware, promotes maintainability and scalability.  The use of `dotenv` for environment variables improves security by keeping sensitive information out of version control.
+
+
+Next: [Backend API Endpoints](./2.1_backend_api.mdx)

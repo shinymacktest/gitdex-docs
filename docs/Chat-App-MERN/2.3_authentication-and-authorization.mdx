@@ -1,0 +1,389 @@
+---
+title: "Authentication and Authorization"
+description: "Explanation of the authentication mechanisms, middleware, and user session management."
+sidebar_position: 23
+---
+
+---
+title: "Authentication and Authorization"
+description: "Explanation of the authentication mechanisms, middleware, and user session management."
+sidebar_position: 23
+---
+
+# Authentication and Authorization
+<TOC />
+
+Authentication and authorization are fundamental components for securing any web application, ensuring that only legitimate users can access protected resources and perform authorized actions. This documentation outlines the system's approach to user registration, login, session management, and access control, integrating both traditional email/password and third-party (Google OAuth) authentication methods.
+
+## Authentication System Purpose
+
+The authentication system is designed to:
+
+*   **Secure User Data:** Protect sensitive user information and ensure data integrity.
+*   **Manage User Identities:** Provide robust mechanisms for user registration (signup) and identification (login).
+*   **Support Multiple Authentication Providers:** Offer flexibility with both local email/password authentication and Google OAuth.
+*   **Maintain User Sessions:** Persist user login status across requests using JWTs stored in HTTP-only cookies.
+*   **Control Access:** Implement middleware to restrict access to protected routes based on authentication status.
+*   **Enhance User Experience:** Provide clear feedback on authentication status and errors.
+
+## Architecture
+
+The authentication and authorization architecture involves several interacting components on the backend: controllers for business logic, middleware for request processing, and a dedicated library for Passport.js configuration.
+
+
+
+```mermaid
+graph TD
+    A["Client (Frontend)"] --> B{HTTP Request};
+    B -- signup, login --> C[Auth Routes];
+    B -- protected resource --> D[Auth Middleware];
+    C -- email/password --> E[Auth Controller];
+    C -- /google --> F[Passport.js (Google Strategy)];
+    D -- Valid Token --> G[Protected Route Handler];
+    D -- Invalid Token --> H{"401 Unauthorized"};
+    E -- Hashing --> I[bcryptjs];
+    E -- User Model --> J[MongoDB];
+    E -- Generate JWT --> K[JWT Utility];
+    F -- Google Auth --> L["Google OAuth Server"];
+    L --> F -- User Data --> J;
+    K --> A -- HTTP-only Cookie --> A;
+    G --> J;
+    J -- User Data --> E;
+    J -- User Data --> F;
+```
+
+
+
+*   **Client (Frontend):** Initiates authentication requests (signup, login, Google OAuth, accessing protected resources).
+*   **Auth Routes:** Define API endpoints for authentication actions.
+*   **Auth Controller:** Contains the core logic for signup, login, logout, and profile updates. It interacts with the `User` model, `bcryptjs` for password hashing, and a JWT utility for token generation.
+*   **Passport.js (Google Strategy):** Manages the Google OAuth flow, including redirecting to Google, handling callbacks, and creating/finding users based on Google profile information.
+*   **Auth Middleware (`protectRoute`):** Intercepts requests to protected routes, verifies JWTs from cookies, and attaches the authenticated user object to the request.
+*   **bcryptjs:** Used for securely hashing and comparing user passwords.
+*   **JWT Utility:** Responsible for signing and verifying JSON Web Tokens.
+*   **MongoDB:** The database storing user information, including `googleId` for OAuth users and hashed passwords for local users.
+
+## Technology Stack
+
+| Layer/Component       | Technology     | Purpose                                                          |
+| :-------------------- | :------------- | :--------------------------------------------------------------- |
+| **Hashing**           | `bcryptjs`     | Securely hash and compare user passwords.                        |
+| **JWT Generation**    | `jsonwebtoken` | Create and verify JSON Web Tokens for session management.        |
+| **OAuth Integration** | `passport`     | Authentication middleware for Node.js.                           |
+| **Google Strategy**   | `passport-google-oauth20` | Specific strategy for Google OAuth 2.0.                       |
+| **Cloud Storage**     | `cloudinary`   | Cloud-based image and video management (for profile pictures).   |
+| **Database**          | `MongoDB`      | Persistent storage for user accounts.                            |
+| **ORM**               | `Mongoose`     | Object Data Modeling for MongoDB, used with the `User` model.    |
+| **Web Framework**     | `Express.js`   | Routing and API endpoint handling.                               |
+
+## Features
+
+### User Registration (`signup`)
+
+The `signup` controller handles new user registrations via email and password. It includes robust validation for username and password complexity, uniqueness checks for email and username, password hashing, and JWT generation upon successful registration.
+
+```javascript
+// backend/src/controllers/auth.controller.js
+export const signup = async (req, res) => {
+    const {username, email, password} = req.body;
+    try {
+        // ... (input validation logic) ...
+
+        const user = await User.findOne({email});
+        if (user) return res.status(400).json({message: "Email already exists."});
+        
+        const existingUserByUsername = await User.findOne({ username });
+        if (existingUserByUsername) {
+            return res.status(400).json({ message: "Username already exists. Please choose another." });
+        }
+
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(password, salt);
+
+        const newUser = new User({
+            username,
+            email,
+            password: hashedPassword,
+            authProvider: 'email'
+        });
+        if(newUser){
+            generateToken(newUser._id, res); // Generate and set JWT cookie
+            await newUser.save();
+
+            res.status(201).json({
+                _id: newUser._id,
+                username: newUser.username,
+                email: newUser.email,   
+                profilePic: newUser.profilePic,
+                authProvider: newUser.authProvider
+            });
+        } else {
+            res.status(400).json({message: "Invalid user data."});
+        }
+    } catch (error) {
+        console.log("Error in signup controller", error.message)
+        res.status(500).json({message: "Something went wrong."});
+    }
+};
+```
+[View on GitHub](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/controllers/auth.controller.js#L5-L53)
+
+*   **Input Validation:** Ensures `username`, `email`, and `password` meet specified criteria (e.g., length constraints).
+*   **Uniqueness Checks:** Prevents duplicate user accounts by checking for existing emails and usernames.
+*   **Password Hashing:** Utilizes `bcryptjs` with a salt round of 10 to securely hash passwords before storing them in the database.
+*   **Token Generation:** Upon successful registration, `generateToken` (from `../lib/utils.js`) is called to create a JWT and set it as an HTTP-only cookie.
+*   **Scalability Insight:** For high-traffic applications, consider rate limiting on signup endpoints to prevent brute-force attacks or abuse.
+
+### User Login (`login`)
+
+The `login` controller authenticates users based on their email and password. It validates credentials and generates a JWT upon successful authentication.
+
+```javascript
+// backend/src/controllers/auth.controller.js
+export const login = async (req, res) => {
+    const {email, password} = req.body;
+    try {
+        const user = await User.findOne({email});
+
+        if(!user) {
+            return res.status(400).json({message: "Invalid credentials."});
+        }
+
+        if(user.authProvider === 'google' && !user.password){
+            return res.status(400).json({ message: "Please sign in with Google." });
+        }
+
+        const isPasswordCorrect = await bcrypt.compare(password, user.password);
+        if(!isPasswordCorrect) {
+            return res.status(400).json({message: "Invalid credentials."});
+        }
+
+        generateToken(user._id, res); // Generate and set JWT cookie
+        res.status(200).json({
+            _id: user._id,
+            username: user.username,
+            email: user.email,
+            profilePic: user.profilePic,
+            authProvider: user.authProvider,
+        });
+    } catch (error) {
+        console.log("Error in login controller", error.message);
+        res.status(500).json({message: "Something went wrong."});
+    }
+};
+```
+[View on GitHub](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/controllers/auth.controller.js#L55-L87)
+
+*   **Credential Verification:** Finds the user by email and compares the provided password with the stored hashed password using `bcrypt.compare()`.
+*   **Provider Check:** Specifically handles cases where a user registered via Google OAuth attempting to log in with an email/password.
+*   **JWT Generation:** A new JWT is generated and set as a cookie to establish the user's session.
+*   **Security Best Practice:** Avoid generic error messages like "Invalid credentials" to prevent enumeration attacks (where an attacker tries to guess valid emails or passwords).
+
+### User Logout (`logout`)
+
+The `logout` controller invalidates the user's session by clearing the JWT cookie.
+
+```javascript
+// backend/src/controllers/auth.controller.js
+export const logout = (req, res) => {
+    try {
+        res.cookie("jwt", "", {maxAge: 0}); // Clear the JWT cookie
+        res.status(200).json({message: "Logged out successfully."})
+    } catch(error) {
+        console.log("Error in logout controller", error.message);
+        res.status(500).json({message:"Internal Server Error"}); 
+    }
+};
+```
+[View on GitHub](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/controllers/auth.controller.js#L89-L97)
+
+*   **Cookie Expiration:** Sets the `jwt` cookie's `maxAge` to `0`, effectively deleting it from the client's browser.
+
+### Google OAuth Integration
+
+The system uses `passport-google-oauth20` for Google-based authentication.
+
+```javascript
+// backend/src/lib/passport.config.js
+export const configurePassport = () => {
+    passport.use(new GoogleStrategy({
+        clientID: process.env.GOOGLE_CLIENT_ID,
+        clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+        callbackURL: process.env.GOOGLE_CALLBACK_URL,
+        scope: ['profile', 'email'] 
+    },
+    async (accessToken, refreshToken, profile, done) => {
+        try {
+            let user = await User.findOne({ googleId: profile.id });
+
+            if (user) {
+                return done(null, user); // User found, log them in
+            } else {
+                // Handle new user registration via Google
+                let username = profile.displayName.replace(/\s+/g, '').toLowerCase() || `user${Date.now()}`;
+                const existingUserByUsername = await User.findOne({ username });
+                if (existingUserByUsername) {
+                    username = `${username}${Date.now().toString().slice(-4)}`;
+                }
+                if (username.length > 20) username = username.substring(0,20);
+
+                const newUser = new User({
+                    googleId: profile.id,
+                    email: profile.emails && profile.emails[0] ? profile.emails[0].value : null,
+                    username: username,
+                    authProvider: 'google',
+                });
+
+                if (!newUser.email) {
+                    return done(new Error("Email not provided by Google. Cannot create account."), null);
+                }
+                // Prevent creating a Google account if email already exists with another provider
+                const existingUserByEmail = await User.findOne({ email: newUser.email });
+                if (existingUserByEmail && existingUserByEmail.authProvider !== 'google') {
+                    return done(null, false, { message: `An account with email ${newUser.email} already exists. Please sign in using your original method.` });
+                }
+
+                await newUser.save();
+                return done(null, newUser); // New user created and logged in
+            }
+        } catch (error) {
+            return done(error, null);
+        }
+    }));
+    // ... (serializeUser and deserializeUser) ...
+};
+```
+[View on GitHub](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/lib/passport.config.js#L10-L69)
+
+*   **GoogleStrategy:** Configured with `clientID`, `clientSecret`, and `callbackURL` from environment variables.
+*   **Callback Logic:** The `verify` callback function:
+    *   Checks if a user with `googleId` already exists. If so, logs them in.
+    *   If not, creates a new user, generating a unique username if necessary, and sets `authProvider` to `'google'`.
+    *   Handles cases where Google does not provide an email or an email already exists with a different authentication provider.
+*   **Serialization/Deserialization:** `passport.serializeUser` and `passport.deserializeUser` manage storing and retrieving user information from the session. This attaches the `user` object to `req.user` for subsequent requests.
+*   **Insight:** The current setup uses session-based authentication with Passport for the Google flow, but the primary user session (for subsequent API calls after initial login/signup, including Google) is managed by JWTs stored in HTTP-only cookies. The `googleAuthCallback` controller then generates a JWT for the newly authenticated Google user.
+
+### Authorization Middleware (`protectRoute`)
+
+The `protectRoute` middleware is crucial for securing API endpoints.
+
+```javascript
+// backend/src/middleware/auth.middleware.js
+import jwt from "jsonwebtoken"
+import User from "../models/user.model.js"
+
+export const protectRoute = async (req, res, next) => {
+    try {
+        const token = req.cookies.jwt; // Retrieve JWT from HTTP-only cookie
+        if(!token){
+            return res.status(401).json({message: "Unauthorized - No Token Provided"});
+        }
+
+        const decoded = jwt.verify(token, process.env.JWT_SECRET) // Verify token signature
+
+        if(!decoded) {
+            return res.status(401).json({message: "Unauthorized - Invalid Token"});
+        }
+        const user = await User.findById(decoded.userId).select("-password"); // Fetch user from DB
+
+        if(!user) {
+            return res.status(404).json({message: "User not found"});
+        }
+        req.user = user; // Attach user object to request
+
+        next(); // Proceed to next middleware/route handler
+    } catch (error) {
+        console.log("Error in protectRoute middleware", error.message);
+        res.status(500).json({message: "Internal Server Error"});
+    }
+};
+```
+[View on GitHub](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/middleware/auth.middleware.js#L4-L29)
+
+*   **Token Extraction:** Extracts the JWT from the `jwt` HTTP-only cookie.
+*   **Token Verification:** Uses `jsonwebtoken.verify()` to validate the token's signature and expiration.
+*   **User Retrieval:** If the token is valid, it extracts the `userId` from the decoded payload and fetches the corresponding user from the database. The password field is explicitly excluded (`.select("-password")`) for security.
+*   **Request Augmentation:** Attaches the fetched user object to `req.user`, making it accessible to subsequent route handlers.
+*   **Access Control:** If no token is provided, or the token is invalid, it returns a `401 Unauthorized` response. If the user is not found, it returns `404 Not Found`.
+
+### Profile Management (`updateProfile`)
+
+Allows authenticated users to update their profile information, specifically their username and profile picture.
+
+```javascript
+// backend/src/controllers/auth.controller.js
+export const updateProfile = async (req, res) => {
+    try {
+        const { profilePic, username } = req.body;
+        const userId = req.user._id;
+        let userToUpdate = await User.findById(userId);
+
+        if (!userToUpdate) {
+            return res.status(404).json({ message: "User not found." });
+        }
+
+        const fieldsToUpdate = {};
+        let newUsername = username ? username.trim() : null;
+
+        // Handle username update
+        if (newUsername && newUsername !== userToUpdate.username) {
+            if (newUsername.length < 3 || newUsername.length > 20) {
+                return res.status(400).json({ message: "Username must be between 3 and 20 characters." });
+            }
+            const existingUserWithNewUsername = await User.findOne({ username: newUsername, _id: { $ne: userId } });
+            if (existingUserWithNewUsername) {
+                return res.status(400).json({ message: "This username is already taken by someone else." });
+            }
+            fieldsToUpdate.username = newUsername;
+        }
+
+        // Handle profile picture update
+        if (profilePic) {
+            const uploadResponse = await cloudinary.uploader.upload(profilePic);
+            fieldsToUpdate.profilePic = uploadResponse.secure_url;
+        }
+
+        if (Object.keys(fieldsToUpdate).length === 0) {
+            return res.status(400).json({ message: "No changes provided to update." });
+        }
+
+        const updatedUser = await User.findByIdAndUpdate(userId, { $set: fieldsToUpdate }, { new: true });
+        if (!updatedUser) {
+            return res.status(404).json({ message: "Failed to update user."});
+        }
+        
+        generateToken(updatedUser._id, res); // Re-issue token with potentially updated user info
+
+        res.status(200).json(updatedUser);
+
+    } catch (error) {
+        console.error("Error in updateProfile controller", error.message);
+        if (error.code === 11000 && error.keyValue && error.keyValue.username) {
+            return res.status(400).json({ message: "This username is already taken." });
+        }
+        res.status(500).json({ message: "Internal Server Error while updating profile." });
+    }
+};
+```
+[View on GitHub](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/controllers/auth.controller.js#L170-L242)
+
+*   **Username Update:** Validates the new username for length and uniqueness (excluding the current user).
+*   **Profile Picture Upload:** Integrates with `cloudinary` to upload new profile pictures and stores the secure URL.
+*   **Database Update:** Uses `findByIdAndUpdate` to apply changes to the user document.
+*   **Token Refresh:** A new JWT is generated and set, ensuring that any updated user information (like `username` or `profilePic` if included in the token payload) is reflected in the client's session. This is a good practice, though not strictly necessary if the JWT only contains the `_id`.
+
+## Key Integration Points
+
+*   **Session Management:** The system primarily uses JSON Web Tokens (JWTs) stored in HTTP-only cookies for session management after initial authentication. This approach offers statelessness on the server, which can be beneficial for horizontal scaling. Passport.js handles session internally for the duration of the Google OAuth flow, but ultimately hands over control to the JWT system.
+*   **API Flows:** All authenticated API endpoints are protected by the `protectRoute` middleware, ensuring that a valid JWT is present and verified before accessing resource handlers.
+*   **State Management (Frontend):** The `checkAuth` endpoint allows the frontend to verify the current authentication status without requiring re-authentication. This is crucial for maintaining a seamless user experience, allowing the client-side application to render appropriate UI elements (e.g., show user dashboard vs. login page).
+*   **Error Handling:** Consistent error handling throughout controllers and middleware provides clear feedback to the client for both validation issues and server-side errors.
+*   **Best Practices for Scalability:**
+    *   **Stateless JWTs:** By relying on JWTs, the server does not need to store session information, making it easier to scale horizontally by adding more server instances.
+    *   **HTTP-only Cookies:** Protect JWTs from client-side JavaScript access, mitigating XSS (Cross-Site Scripting) vulnerabilities.
+    *   **Password Hashing:** `bcryptjs` ensures strong, one-way encryption of passwords, crucial for data security.
+    *   **Environmental Variables:** Sensitive credentials (e.g., `JWT_SECRET`, `GOOGLE_CLIENT_ID`) are stored in environment variables, enhancing security and configurability.
+    *   **Cloudinary Integration:** Offloads image storage and management, reducing server load and improving media delivery.
+
+Next: [Frontend Implementation](./3_frontend-implementation.mdx)
+```

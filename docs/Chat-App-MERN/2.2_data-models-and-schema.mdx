@@ -1,0 +1,242 @@
+---
+title: "Data Models and Schema"
+description: "Overview of the database schemas and data models used for users and messages."
+sidebar_position: 22
+---
+
+---
+title: "Data Models and Schema"
+description: "Overview of the database schemas and data models used for users and messages."
+sidebar_position: 22
+---
+
+# Data Models and Schema
+
+<TOC />
+
+This section details the foundational data models and database schema that power the application's user and messaging functionalities. Leveraging MongoDB through Mongoose, the system defines clear structures for storing user profiles, friend relationships, and chat messages. This design emphasizes relational integrity, efficient data retrieval, and robust validation.
+
+## Database Connection
+
+The application connects to MongoDB using Mongoose, a popular ODM (Object Data Modeling) library for Node.js. The connection is managed by a dedicated utility function, `connectDB`, which initializes the database connection using the URI provided in environment variables. This approach ensures secure and flexible configuration for different deployment environments.
+
+### Connection Logic
+
+The `connectDB` function attempts to establish a connection to MongoDB. Upon successful connection, it logs the host, providing immediate feedback on the database status. In case of an error, it logs the error and allows the application to handle the failure gracefully.
+
+```javascript
+// backend/src/lib/db.js
+import mongoose from "mongoose"
+
+export const connectDB = async () => {
+  try {
+    const conn = await mongoose.connect(process.env.MONGODB_URI);
+    console.log(`MongoDB connected:  ${conn.connection.host}`);
+  }
+  catch(error){
+    console.log("MongoDB connection error: ", error);
+  }
+}
+```
+
+[[View on GitHub](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/lib/db.js#L1-L10)]
+
+This modular approach to database connection ensures that the application's data layer is cleanly separated, making it easier to manage and scale. For production environments, it is crucial to monitor database connections and implement retry mechanisms for transient errors.
+
+## User Data Model
+
+The `User` schema defines the structure for storing user-related information, including authentication details, profile data, and social connections. It supports both email-based and Google-based authentication, offering flexibility to users. The schema incorporates robust validation rules to maintain data integrity.
+
+### User Schema Definition
+
+The `userSchema` includes fields for email, username, password, profile picture, and lists for friends, friend requests, and sent requests. It also distinguishes between authentication providers and stores a `googleId` for Google-authenticated users.
+
+```javascript
+// backend/src/models/user.model.js
+import mongoose from "mongoose"
+
+const  userSchema = new mongoose.Schema(
+    {
+        email: {
+            type: String,
+            required: true,
+            unique: true
+        },
+        username: {
+            type: String,
+            required: [true, "Username is required"],
+            unique: true,
+            trim: true,
+            minlength: [3, "Username must be at least 3 characters long"],
+            maxlength: [20, "Username cannot be more than 20 characters long"]
+        }
+        ,
+        password: {
+            type: String,
+            minlength: 6,
+        },
+        profilePic: {
+            type: String,
+            default: "",
+        },
+        friends: [{
+            type: mongoose.Schema.Types.ObjectId,
+            ref: "User",
+            default: []
+        }],
+        friendRequests: [{ // Incoming friend requests
+            type: mongoose.Schema.Types.ObjectId,
+            ref: "User",
+            default: []
+        }],
+        sentRequests: [{ // Outgoing friend requests
+            type: mongoose.Schema.Types.ObjectId,
+            ref: "User",
+            default: []
+        }],
+        authProvider: {
+            type: String,
+            enum: ['email', 'google'],
+            default: 'email'
+        },
+        googleId: {
+            type: String,
+            unique: true,
+            sparse: true
+        },
+    },
+    {
+        timestamps: true
+    }
+);
+```
+
+[[View on GitHub](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/models/user.model.js#L3-L64)]
+
+### Pre-save Hook for Password Management
+
+A pre-save hook is implemented to handle password requirements based on the `authProvider`. For Google-authenticated users, the password field is set to `undefined` if not modified. For email-based sign-ups, a password is strictly required.
+
+```javascript
+// backend/src/models/user.model.js
+userSchema.pre('save', async function(next) {
+    if (this.authProvider === 'google' && !this.isModified('password')) {
+        this.password = undefined;
+    }
+    if (this.authProvider === 'email' && !this.password && this.isNew) {
+        return next(new Error('Password is required for email signup.'));
+    }
+    next();
+});
+
+const User = mongoose.model("User", userSchema);
+
+export default User;
+```
+
+[[View on GitHub](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/models/user.model.js#L66-L76)]
+
+This logic ensures that password requirements are enforced correctly depending on the authentication method, improving security and data consistency.
+
+### User Model Details
+
+| Field            | Type                          | Description                                                               | Validation/Constraints                                                    |
+| :--------------- | :---------------------------- | :------------------------------------------------------------------------ | :------------------------------------------------------------------------ |
+| `email`          | `String`                      | User's email address.                                                     | Required, Unique.                                                         |
+| `username`       | `String`                      | User's unique display name.                                               | Required, Unique, Trimmed, Min length: 3, Max length: 20.                 |
+| `password`       | `String`                      | Hashed password for email authentication.                                 | Min length: 6 (required for `authProvider: 'email'`).                   |
+| `profilePic`     | `String`                      | URL to the user's profile picture.                                        | Default: `""`.                                                            |
+| `friends`        | `Array` of `ObjectId` (`User`) | List of ObjectIds referring to other User documents, representing friends. | Default: `[]`.                                                            |
+| `friendRequests` | `Array` of `ObjectId` (`User`) | List of ObjectIds referring to other User documents, for incoming requests. | Default: `[]`.                                                            |
+| `sentRequests`   | `Array` of `ObjectId` (`User`) | List of ObjectIds referring to other User documents, for outgoing requests. | Default: `[]`.                                                            |
+| `authProvider`   | `String`                      | The authentication method used by the user.                               | Enum: `['email', 'google']`, Default: `'email'`.                        |
+| `googleId`       | `String`                      | Unique identifier from Google for users authenticated via Google.         | Unique, Sparse (allows `null` values for non-Google users).               |
+| `timestamps`     | `Boolean`                     | Mongoose timestamps (`createdAt`, `updatedAt`).                           | Automatically adds `createdAt` and `updatedAt` fields.                    |
+
+## Message Data Model
+
+The `Message` schema defines the structure for individual chat messages exchanged between users. It establishes a clear relationship between sender and receiver, and supports both text and image content.
+
+### Message Schema Definition
+
+The `messageSchema` includes `senderId`, `receiverId`, `text` content, and an optional `image` URL. Both `senderId` and `receiverId` are `ObjectId` references to the `User` model, ensuring message traceability.
+
+```javascript
+// backend/src/models/message.model.js
+import express from "express";
+import mongoose from "mongoose";
+
+const messageSchema = new mongoose.Schema(
+    {
+     senderId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User",
+        required: true,
+     },
+     receiverId: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: "User",
+        required: true,
+     },
+     text: {
+        type: String,
+     },
+     image: {
+        type: String,
+     },
+    },
+    {timestamps: true}
+);
+
+export default mongoose.model("Message", messageSchema);
+```
+
+[[View on GitHub](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/models/message.model.js#L4-L27)]
+
+This schema is designed to be lightweight yet capable of handling common messaging requirements. The use of `timestamps` is crucial for ordering messages chronologically and for auditing purposes.
+
+### Message Model Details
+
+| Field        | Type                          | Description                                     | Validation/Constraints             |
+| :----------- | :---------------------------- | :---------------------------------------------- | :--------------------------------- |
+| `senderId`   | `ObjectId` (`User`)           | The ID of the user who sent the message.        | Required, References `User` model. |
+| `receiverId` | `ObjectId` (`User`)           | The ID of the user intended to receive the message. | Required, References `User` model. |
+| `text`       | `String`                      | The textual content of the message.             | Optional.                          |
+| `image`      | `String`                      | URL to an image attached to the message.        | Optional.                          |
+| `timestamps` | `Boolean`                     | Mongoose timestamps (`createdAt`, `updatedAt`). | Automatically adds `createdAt` and `updatedAt` fields. |
+
+## Data Model Relationship Diagram
+
+The following diagram illustrates the relationships between the `User` and `Message` data models, highlighting how they interact to support user profiles and conversations.
+
+
+
+```mermaid
+graph TD
+    User["User Model"] -->|has friends & requests| User;
+    User -->|sends messages to| Message;
+    User -->|receives messages from| Message;
+
+    User -- "1" --> "N" MessageSender[("senderId")];
+    User -- "1" --> "N" MessageReceiver[("receiverId")];
+
+    MessageSender --> Message["Message Model"];
+    MessageReceiver --> Message;
+```
+
+
+
+This diagram shows that a `User` can send and receive multiple `Message` documents, establishing a one-to-many relationship in both directions from the perspective of an individual message. The `senderId` and `receiverId` fields in the `Message` model are foreign keys referencing the `User` model.
+
+## Key Integration Points
+
+The data models defined here are central to the application's functionality. They integrate with:
+
+*   **Authentication and Authorization**: The `User` model stores credentials and profile information, which are crucial for user registration, login, and session management. The `authProvider` and `googleId` fields facilitate different authentication strategies.
+*   **Friendship Management**: The `friends`, `friendRequests`, and `sentRequests` arrays within the `User` model enable the core social features, allowing users to connect and manage their network. Operations like sending, accepting, and declining friend requests directly manipulate these fields.
+*   **Real-time Messaging**: The `Message` model is the cornerstone of the chat functionality. Messages are created, stored, and retrieved based on `senderId` and `receiverId` to populate conversation threads. The timestamp ensures messages are ordered correctly.
+*   **API Endpoints**: Backend API endpoints interact directly with these Mongoose models to perform CRUD (Create, Read, Update, Delete) operations. For example, a user registration endpoint creates a new `User` document, while a message sending endpoint creates a new `Message` document.
+*   **Scalability and Performance**: The choice of MongoDB and Mongoose, combined with proper indexing (e.g., `unique` on email and username), contributes to scalable data storage and efficient queries. For messaging, indexing `senderId`, `receiverId`, and `createdAt` would be crucial for fast message retrieval in conversations.
+
+Next: [Authentication and Authorization](./2.3_authentication-and-authorization.mdx)
+```

@@ -1,0 +1,219 @@
+---
+title: "Backend Architecture and Services"
+description: "Overview of the backend structure, main entry points, and common utilities."
+sidebar_position: 2
+---
+ # Backend Architecture and Services
+
+This document provides a comprehensive overview of the backend architecture for the application, detailing its structure, core services, and how different components interact. The backend is built on Node.js with Express, leveraging MongoDB for data persistence and Socket.IO for real-time communication.
+
+## Core Backend Structure
+
+The backend is organized into a modular structure, with a central `index.js` file acting as the application's entry point, configuring middleware, routes, and initiating the server. Key functionalities are segregated into `lib` (utilities, database, socket) and `routes` (API endpoints) directories.
+
+### Project Dependencies and Scripts
+
+The `package.json` file outlines the project's metadata, scripts, and dependencies. It specifies `src/index.js` as the main entry point and defines `dev` and `start` scripts for development and production environments, respectively.
+
+```json
+// backend/package.json
+{
+  "name": "backend",
+  "version": "1.0.0",
+  "main": "src/index.js",
+  "scripts": {
+    "dev": "nodemon src/index.js",
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "bcryptjs": "^2.4.3",
+    "cloudinary": "^2.5.1",
+    "cookie-parser": "^1.4.7",
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2",
+    "express-session": "^1.18.1",
+    "jsonwebtoken": "^9.0.2",
+    "mongoose": "^8.9.5",
+    "passport": "^0.7.0",
+    "passport-google-oauth20": "^2.0.0",
+    "socket.io": "^4.8.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.1.9"
+  }
+}
+```
+The `dependencies` section highlights crucial libraries for:
+*   **Authentication**: `bcryptjs`, `jsonwebtoken`, `passport`, `passport-google-oauth20`, `express-session`, `cookie-parser`.
+*   **Database**: `mongoose` (for MongoDB ODM).
+*   **Web Server**: `express`.
+*   **Real-time Communication**: `socket.io`.
+*   **Environment Variables**: `dotenv`.
+*   **Cloud Storage**: `cloudinary`.
+
+The `devDependencies` include `nodemon` for automatic server restarts during development.
+[View `package.json` on GitHub](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/package.json)
+
+### Application Entry Point (`backend/src/index.js`)
+
+`backend/src/index.js` is the core of the backend application. It sets up the Express server, configures middleware, defines API routes, and manages the server's lifecycle, including database connection and Socket.IO integration.
+
+```javascript
+// backend/src/index.js (snippet)
+import express from "express";
+import cors from "cors";
+import authRoutes from "./routes/auth.route.js";
+import messageRoutes from "./routes/message.route.js";
+import friendRoutes from "./routes/friend.route.js";
+
+// ... other imports ...
+
+import { connectDB } from "./lib/db.js";
+import { app, server } from "./lib/socket.js"; // Import 'app' and 'server' from socket.js
+
+// ... environment configuration ...
+
+app.use(cookieParser());
+app.use(express.json({limit : '2mb'}));
+app.use(express.urlencoded({ limit: '2mb', extended: true }));
+app.use(cors({
+    origin: "http://localhost:5173",
+    credentials: true,
+}));
+
+app.use(session({ /* ... session config ... */ }));
+app.use(passport.initialize());
+app.use(passport.session());  
+
+app.use("/api/auth", authRoutes );
+app.use("/api/messages", messageRoutes );
+app.use("/api/friends", friendRoutes);
+
+// ... production serving logic ...
+
+server.listen(PORT, () => {
+    console.log("server is running on PORT: " + String(PORT));
+    connectDB();
+});
+```
+This file performs several critical functions:
+*   **Middleware Setup**: Configures `cors` for cross-origin requests, `cookie-parser` for handling cookies, and `express.json`/`express.urlencoded` for parsing request bodies.
+*   **Session Management**: Integrates `express-session` and `passport` for user authentication and session handling, supporting strategies like Google OAuth20.
+*   **Route Handling**: Mounts specific route handlers (`authRoutes`, `messageRoutes`, `friendRoutes`) under `/api` endpoints, directing incoming requests to their respective controllers.
+*   **Database Connection**: Calls `connectDB()` upon server startup to establish a connection to MongoDB.
+*   **Server Initialization**: Starts the HTTP server (which is also wrapped by Socket.IO) on the specified `PORT`.
+*   **Production Build Serving**: If `NODE_ENV` is `production`, it serves static files from the `frontend/dist` directory, enabling a unified deployment.
+[View `backend/src/index.js` on GitHub](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/index.js#L1-L71)
+
+## Backend Services
+
+### Database Connection (`backend/src/lib/db.js`)
+
+The `db.js` file is responsible for establishing and managing the connection to MongoDB using Mongoose.
+
+```javascript
+// backend/src/lib/db.js
+import mongoose from "mongoose"
+
+export const connectDB = async () => {
+  try {
+    const conn = await mongoose.connect(process.env.MONGODB_URI);
+    console.log(`MongoDB connected:  ${conn.connection.host}`);
+  }
+  catch(error){
+    console.log("MongoDB connection error: ", error);
+  }
+}
+```
+The `connectDB` function attempts to connect to the MongoDB URI specified in `process.env.MONGODB_URI`. It logs a success message including the host if the connection is established, or an error message if the connection fails. This centralized approach ensures consistent database interaction across the application.
+[View `backend/src/lib/db.js` on GitHub](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/lib/db.js)
+
+### Real-time Communication (`backend/src/lib/socket.js`)
+
+`socket.js` sets up and manages the Socket.IO server, enabling real-time bidirectional event-based communication between clients and the server. This is crucial for features like instant messaging and online user status updates.
+
+```javascript
+// backend/src/lib/socket.js
+import { Server } from "socket.io";
+import http from "http";
+import express from "express";
+
+const app = express(); // A new express instance for Socket.IO internal use
+const server = http.createServer(app); // HTTP server instance
+
+const io = new Server(server, {
+    cors: {
+        origin: ["http://localhost:5173"] // Frontend origin
+    }
+});
+
+export function getReceiverSocketId(userId) {
+    return userSocketMap[userId];
+}
+
+const userSocketMap = {}; // { userId: socketId }
+
+io.on("connection", (socket) => {
+    console.log("A user connected", socket.id);
+
+    const userId = socket.handshake.query.userId;
+    if(userId) userSocketMap[userId] = socket.id;
+
+    io.emit("getOnlineUsers", Object.keys(userSocketMap));
+
+    socket.on("disconnect", ()=>{
+        console.log("A user disconnected", socket.id);
+        delete userSocketMap[userId]; 
+        io.emit("getOnlineUsers", Object.keys(userSocketMap));
+    })
+})
+
+export { io, app, server };
+```
+Key aspects of the `socket.js` implementation:
+*   **HTTP Server Wrapper**: It creates an `http` server instance that wraps an `express` app (distinct from the main `index.js`'s app, but the `server` object is exported and reused). This allows Socket.IO to share the same HTTP server as the main Express application.
+*   **CORS Configuration**: Specifies the allowed `origin` for Socket.IO connections, matching the frontend's URL.
+*   **`userSocketMap`**: An object `userSocketMap` stores a mapping of `userId` to `socketId`, which is essential for sending private messages or targeting specific online users.
+*   **Connection and Disconnection Handlers**:
+    *   `io.on("connection")`: When a new client connects, it extracts the `userId` from the handshake query, adds the user to `userSocketMap`, and broadcasts the updated list of online users.
+    *   `socket.on("disconnect")`: When a client disconnects, their entry is removed from `userSocketMap`, and the updated online users list is again broadcasted.
+*   **`getReceiverSocketId`**: A utility function to retrieve the `socketId` of a specific user, enabling targeted communication.
+[View `backend/src/lib/socket.js` on GitHub](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/lib/socket.js)
+
+### Backend Service Interactions
+
+The following diagram illustrates the primary interactions between the core backend components:
+
+
+
+
+
+```mermaid
+graph TD
+    A["Frontend (React)"] -->|HTTP/HTTPS Requests| B["Express Server (index.js)"]
+    A -->|Socket.IO Connection| C["Socket.IO Server (socket.js)"]
+    B -->|API Routes| D["Auth Routes"]
+    B -->|API Routes| E["Message Routes"]
+    B -->|API Routes| F["Friend Routes"]
+    D -->|Database Operations| G["MongoDB (db.js)"]
+    E -->|Database Operations| G
+    F -->|Database Operations| G
+    E -->|Real-time Events| C
+    C -->|Broadcast/Emit| A
+    B --.->|"Authentication/Session"| Passport["Passport.js"]
+    Passport --> G
+```
+
+
+
+## Key Integration Points
+
+The backend architecture is designed for maintainability and scalability, with clear separation of concerns.
+
+1.  **Unified Server Instance**: The `server` object exported from `socket.js` is the same HTTP server instance that `index.js` uses to listen for incoming connections. This means both Express and Socket.IO operate on the same port, simplifying deployment and network configuration.
+2.  **Authentication Flow**: `index.js` integrates `passport.js` for robust authentication. User authentication requests hit `/api/auth` routes, which then use `passport` to verify credentials (local or Google OAuth20) and manage sessions. This ensures that secure, authenticated users can access protected resources.
+3.  **Real-time Messaging**: When a new message is sent via `messageRoutes` (an HTTP POST request to `/api/messages`), the server typically saves it to the database (`db.js`). After saving, the `messageRoutes` will then use the `io` (Socket.IO server) instance from `socket.js` to emit a real-time event to the recipient(s) and sender, ensuring instant message delivery without requiring the client to poll for updates. The `getReceiverSocketId` utility is crucial here for targeting specific users.
+4.  **Database Abstraction**: `db.js` provides a single point of truth for database connections. All route handlers and services interact with MongoDB through Mongoose, whose connection is managed by `db.js`. This promotes consistency and simplifies database operations across the application.
+5.  **Environment Configuration**: The use of `dotenv` in `index.js` ensures that sensitive information (like `MONGODB_URI`, `SESSION_SECRET`, `PORT`) and configuration values are loaded from environment variables, keeping them out of the codebase and making the application configurable for different deployment environments (development, production).
+
+These integration points highlight a coherent system where distinct services work in concert to provide the application's core functionalities, from user management and data persistence to real-time communication.

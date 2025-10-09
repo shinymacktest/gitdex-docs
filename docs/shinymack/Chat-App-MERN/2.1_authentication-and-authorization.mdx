@@ -1,0 +1,466 @@
+---
+title: "Authentication and Authorization"
+description: "Details on user authentication strategies, session management, and access control within the backend."
+sidebar_position: 21
+---
+ # Authentication and Authorization
+
+This document provides a comprehensive overview of the authentication and authorization mechanisms implemented in the backend, covering user registration, login, session management, and access control. The system supports both traditional email/password authentication and Google OAuth for a seamless user experience.
+
+## User Authentication Strategies
+
+The application employs a robust authentication system that integrates both local (email/password) and third-party (Google OAuth) strategies. User credentials and session data are handled securely to maintain integrity and privacy.
+
+### Email/Password Authentication
+
+Users can register and log in using their email and a secure password. The `auth.controller.js` file handles the core logic for these operations.
+
+#### User Registration (`signup`)
+
+The `signup` function creates a new user account after validating the provided `username`, `email`, and `password`. Passwords are securely hashed using `bcryptjs` before storage. Upon successful registration, a JSON Web Token (JWT) is generated and set as an HTTP-only cookie to establish the user's session.
+
+```javascript filename="backend/src/controllers/auth.controller.js" lines={6-39}
+export const signup = async (req, res) => {
+    // console.log(req.body); //debugging
+    const {username, email, password} = req.body;
+    try {
+        if(!username || !email || !password) {
+            return res.status(400).json({message: "Please fill in all fields."});
+        }
+        if (username.length < 3) {
+            return res.status(400).json({ message: "Username must be at least 3 characters." });
+        }
+        if (username.length > 20) {
+            return res.status(400).json({ message: "Username cannot be more than 20 characters." });
+        }
+        if (password.length < 6) {
+            return res.status(400).json({message: "Password must be at least 6 characters."});
+        }
+        const user = await User.findOne({email});
+        if (user) return res.status(400).json({message: "Email already exists."});
+        
+        const existingUserByUsername = await User.findOne({ username });
+        if (existingUserByUsername) {
+            return res.status(400).json({ message: "Username already exists. Please choose another." });
+        }
+
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(password, salt);
+
+        const newUser = new User({
+            username,
+            email,
+            password: hashedPassword,
+            authProvider: 'email'
+        });
+        if(newUser){
+            //generate jwt token here
+            generateToken(newUser._id, res);
+            await newUser.save();
+
+            res.status(201).json({
+                _id: newUser._id,
+                username: newUser.username,
+                email: newUser.email,   
+                profilePic: newUser.profilePic,
+                authProvider: newUser.authProvider
+            });
+        } else {
+            res.status(400).json({message: "Invalid user data."});
+        }
+    } catch (error) {
+        console.log("Error in signup controller", error.message)
+        res.status(500).json({message: "Something went wrong."});
+    }
+};
+```
+[View on GitHub](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/controllers/auth.controller.js#L6-L39)
+
+#### User Login (`login`)
+
+The `login` function authenticates users by verifying their email and password against stored credentials. It also checks if a user attempting email/password login previously registered via Google, preventing credential conflicts. On successful login, a new JWT is issued.
+
+```javascript filename="backend/src/controllers/auth.controller.js" lines={41-69}
+export const login = async (req, res) => {
+    const {email, password} = req.body;
+    try {
+        const user = await User.findOne({email});
+
+        if(!user) {
+            return res.status(400).json({message: "Invalid credentials."});
+        }
+
+        if(user.authProvider === 'google' && !user.password){
+            return res.status(400).json({ message: "Please sign in with Google." });
+        }
+
+        const isPasswordCorrect = await bcrypt.compare(password, user.password);
+        if(!isPasswordCorrect) {
+            return res.status(400).json({message: "Invalid credentials."});
+        }
+
+        generateToken(user._id, res);
+        res.status(200).json({
+            _id: user._id,
+            username: user.username,
+            email: user.email,
+            profilePic: user.profilePic,
+            authProvider: user.authProvider,
+        });
+    } catch (error) {
+        console.log("Error in login controller", error.message);
+        res.status(500).json({message: "Something went wrong."});
+    }
+};
+```
+[View on GitHub](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/controllers/auth.controller.js#L41-L69)
+
+#### User Logout (`logout`)
+
+The `logout` function effectively terminates a user's session by clearing the JWT cookie from the client's browser.
+
+```javascript filename="backend/src/controllers/auth.controller.js" lines={71-78}
+export const logout = (req, res) => {
+    try {
+        res.cookie("jwt", "", {maxAge: 0});
+        res.status(200).json({message: "Logged out successfully."})
+    } catch(error) {
+        console.log("Error in logout controller", error.message);
+        res.status(500).json({message:"Internal Server Error"}); 
+    }
+};
+```
+[View on GitHub](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/controllers/auth.controller.js#L71-L78)
+
+### Google OAuth Integration
+
+The application leverages Passport.js with `passport-google-oauth20` for Google-based authentication. This provides a convenient and secure way for users to sign in using their Google accounts.
+
+#### Passport Configuration
+
+The `passport.config.js` file configures the Google Strategy. It defines how user profiles received from Google are processed:
+-   If a user with the Google ID already exists, they are logged in.
+-   If not, a new user account is created using their Google profile data (email, display name). A robust check is performed to ensure an email-based account doesn't already exist for the same email without being linked to Google.
+
+```javascript filename="backend/src/lib/passport.config.js" lines={8-54}
+export const configurePassport = () => {
+    passport.use(new GoogleStrategy({
+        clientID: process.env.GOOGLE_CLIENT_ID,
+        clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+        callbackURL: process.env.GOOGLE_CALLBACK_URL,
+        scope: ['profile', 'email'] 
+    },
+    async (accessToken, refreshToken, profile, done) => {
+        try {
+            // console.log("Google Profile:", profile); // 
+
+            let user = await User.findOne({ googleId: profile.id });
+
+            if (user) {
+                return done(null, user);
+            } else {
+                let username = profile.displayName.replace(/\s+/g, '').toLowerCase() || `user${Date.now()}`;
+
+                const existingUserByUsername = await User.findOne({ username });
+                if (existingUserByUsername) {
+                    username = `${username}${Date.now().toString().slice(-4)}`; // Make it more unique
+                }
+                if (username.length > 20) username = username.substring(0,20);
+
+
+                const newUser = new User({
+                    googleId: profile.id,
+                    email: profile.emails && profile.emails[0] ? profile.emails[0].value : null, // Take the first email
+                    username: username,
+                    // profilePic: profile.photos && profile.photos[0] ? profile.photos[0].value : '', // Optional: Use Google profile pic
+                    authProvider: 'google',
+                });
+
+                if (!newUser.email) {
+                    return done(new Error("Email not provided by Google. Cannot create account."), null);
+                }
+
+                const existingUserByEmail = await User.findOne({ email: newUser.email });
+                if (existingUserByEmail && existingUserByEmail.authProvider !== 'google') {
+                    return done(null, false, { message: `An account with email ${newUser.email} already exists. Please sign in using your original method.` });
+                }
+
+
+                await newUser.save();
+                return done(null, newUser);
+            }
+        } catch (error) {
+            return done(error, null);
+        }
+    }));
+
+    // Serialize user to store in session (just the user ID)
+    passport.serializeUser((user, done) => {
+        done(null, user.id); // user.id is the _id from MongoDB
+    });
+
+    // Deserialize user from session (fetch user from DB using the ID)
+    passport.deserializeUser(async (id, done) => {
+        try {
+            const user = await User.findById(id);
+            done(null, user); // This user object is attached to req.user
+        } catch (error) {
+            done(error, null);
+        }
+    });
+};
+```
+[View on GitHub](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/lib/passport.config.js#L8-L54)
+
+#### Google OAuth Callback
+
+After Google authenticates the user, it redirects to the `googleAuthCallback` endpoint. This controller function generates a JWT for the authenticated user and redirects them back to the frontend.
+
+```javascript filename="backend/src/controllers/auth.controller.js" lines={101-115}
+export const googleAuthCallback = async (req, res) => {
+ const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5173';
+
+    try {
+        if (!req.user) {
+            return res.redirect(`${frontendUrl}/login?error=google_auth_failed`);
+        }
+
+        generateToken(req.user._id, res);
+
+        res.redirect(frontendUrl);
+
+    } catch (error) {
+        console.error("Error in googleAuthCallback: ", error.message);
+        res.redirect(`${frontendUrl}/login?error=google_auth_processing_error`);
+    }
+};
+```
+[View on GitHub](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/controllers/auth.controller.js#L101-L115)
+
+### Authentication Flow (Email/Password)
+
+Here's a simplified representation of the email/password authentication flow:
+
+
+
+
+
+```mermaid
+graph TD
+    A["Client (Frontend)"] -->|"1. POST /api/auth/signup or /login (Credentials)"| B["Backend (auth.route.js)"]
+    B -->|"2. Call Controller (auth.controller.js)"| C{"Validate Input & User Lookup"}
+    C -- "If User/Credentials Invalid" --> A: "Error Response (e.g., 400)"
+    C -- "If Valid (signup: new user, login: existing user)" --> D["Hash Password (bcryptjs - for signup)"]
+    D --> E["Generate JWT (utils.js)"]
+    E --> F["Set JWT as HTTP-only Cookie"]
+    F --> A: "3. Success Response (User Data + Cookie)"
+```
+
+
+
+## Session Management and Access Control
+
+### JWT-based Session Management
+
+The application uses JSON Web Tokens (JWTs) for stateless session management. Upon successful authentication (either email/password or Google OAuth), a JWT is generated and stored as an HTTP-only cookie on the client side. This token contains the user's ID, enabling the backend to identify and authenticate subsequent requests without requiring repeated login credentials.
+
+The `generateToken` utility function (not shown in provided files, but its usage is clear) is responsible for creating these tokens and setting the cookie.
+
+### Protected Routes and Middleware
+
+Access control is enforced using the `protectRoute` middleware. This middleware intercepts incoming requests to protected endpoints, verifies the presence and validity of the JWT, and attaches the authenticated user's information to the `req.user` object. If the token is missing or invalid, the request is rejected with a `401 Unauthorized` status.
+
+```javascript filename="backend/src/middleware/auth.middleware.js" lines={5-28}
+import jwt from "jsonwebtoken"
+import User from "../models/user.model.js"
+
+export const protectRoute = async (req, res, next) => {
+    try {
+        const token = req.cookies.jwt;
+        if(!token){
+            return res.status(401).json({message: "Unauthorized - No Token Provided"});
+        }
+
+        const decoded = jwt.verify(token, process.env.JWT_SECRET)
+
+        if(!decoded) {
+            return res.status(401).json({message: "Unauthorized - Invalid Token"});
+        }
+        const user = await User.findById(decoded.userId).select("-password");
+
+        if(!user) {
+            return res.status(404).json({message: "User not found"});
+        }
+        req.user = user;
+
+        next();
+    } catch (error) {
+        console.log("Error in protectRoute middleware", error.message);
+        res.status(500).json({message: "Internal Server Error"});
+
+    }
+
+};
+```
+[View on GitHub](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/middleware/auth.middleware.js#L5-L28)
+
+This middleware is applied to various routes in `auth.route.js` to secure specific functionalities like checking authentication status, updating profiles, and checking username availability.
+
+```javascript filename="backend/src/routes/auth.route.js" lines={11-15}
+router.put("/update-profile", protectRoute ,updateProfile)
+
+router.get("/username/check/:username", protectRoute, checkUsernameAvailability);
+
+router.get("/check", protectRoute, checkAuth)
+```
+[View on GitHub](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/routes/auth.route.js#L11-L15)
+
+### Checking Authentication Status (`checkAuth`)
+
+The `checkAuth` endpoint allows the client to verify if the current session is active and retrieve the authenticated user's details without requiring re-authentication. This is a protected route, ensuring only logged-in users can access their profile information.
+
+```javascript filename="backend/src/controllers/auth.controller.js" lines={81-93}
+export const checkAuth = (req, res) => {
+    try {
+        res.status(200).json({
+            _id: req.user._id,
+            username: req.user.username,
+            email: req.user.email,
+            profilePic: req.user.profilePic,
+            authProvider: req.user.authProvider,
+            createdAt: req.user.createdAt
+        });
+    } catch (error) {
+        console.log("Error in checkAuth controller", error.message);
+        res.status(500).json({message: "Internal Server Error"});
+    }
+};
+```
+[View on GitHub](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/controllers/auth.controller.js#L81-L93)
+
+### User Profile Management
+
+Users can update their profile information, such as `profilePic` and `username`. The `updateProfile` controller handles these requests, including validation for usernames and integration with Cloudinary for image uploads. A new JWT is issued after profile updates to reflect any changes in user data that might be included in the token.
+
+```javascript filename="backend/src/controllers/auth.controller.js" lines={142-192}
+export const updateProfile = async (req, res) => {
+    try {
+        const { profilePic, username } = req.body; // Expect username now
+        const userId = req.user._id;
+        let userToUpdate = await User.findById(userId);
+
+        if (!userToUpdate) {
+            return res.status(404).json({ message: "User not found." });
+        }
+
+        const fieldsToUpdate = {};
+        let newUsername = username ? username.trim() : null;
+        let usernameChanged = false;
+
+        // Handle username update
+        if (newUsername && newUsername !== userToUpdate.username) {
+            // Validate new username (length, characters - could reuse parts of checkUsernameAvailability logic or rely on schema)
+            if (newUsername.length < 3 || newUsername.length > 20) {
+                return res.status(400).json({ message: "Username must be between 3 and 20 characters." });
+            }
+            // const usernameRegex = /^[a-zA-Z0-9_]+$/; // Example regex
+            // if (!usernameRegex.test(newUsername)) {
+            //     return res.status(400).json({ message: "Username contains invalid characters." });
+            // }
+
+            const existingUserWithNewUsername = await User.findOne({ username: newUsername, _id: { $ne: userId } });
+            if (existingUserWithNewUsername) {
+                return res.status(400).json({ message: "This username is already taken by someone else." });
+            }
+            fieldsToUpdate.username = newUsername;
+            usernameChanged = true;
+        }
+
+        // Handle profile picture update
+        if (profilePic) {
+            // Assuming profilePic is a base64 string or similar that Cloudinary handles
+            const uploadResponse = await cloudinary.uploader.upload(profilePic);
+            fieldsToUpdate.profilePic = uploadResponse.secure_url;
+        }
+
+        if (Object.keys(fieldsToUpdate).length === 0) {
+            return res.status(400).json({ message: "No changes provided to update." });
+        }
+
+        const updatedUser = await User.findByIdAndUpdate(userId, { $set: fieldsToUpdate }, { new: true });
+
+        if (!updatedUser) {
+            // Should not happen if userToUpdate was found initially unless deleted concurrently
+            return res.status(404).json({ message: "Failed to update user."});
+        }
+
+        // If username changed OR if you always want to refresh the token on profile update
+        // It's good practice to issue a new token if sensitive/display info in it changes
+        // For simplicity here, we'll assume generateToken will be called to refresh cookie with potentially new info
+        generateToken(updatedUser._id, res); // This will set a new cookie with the same name, overriding the old one.
+
+        res.status(200).json(updatedUser);
+
+    } catch (error) {
+        console.error("Error in updateProfile controller", error.message);
+        if (error.code === 11000 && error.keyValue && error.keyValue.username) { // Duplicate key error from DB
+            return res.status(400).json({ message: "This username is already taken." });
+        }
+        res.status(500).json({ message: "Internal Server Error while updating profile." });
+    }
+};
+```
+[View on GitHub](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/controllers/auth.controller.js#L142-L192)
+
+### Username Availability Check
+
+To enhance user experience during registration or profile updates, the `checkUsernameAvailability` endpoint allows clients to query if a desired username is already taken. This is also a protected route, meaning an authenticated user can check availability for a new username.
+
+```javascript filename="backend/src/controllers/auth.controller.js" lines={117-140}
+export const checkUsernameAvailability = async (req, res) => {
+    try {
+        const { username } = req.params;
+        const currentUserId = req.user._id; 
+
+        if (!username || username.trim().length < 3) {
+            return res.status(400).json({ available: false, message: "Username must be at least 3 characters." });
+        }
+        if (username.trim().length > 20) {
+            return res.status(400).json({ available: false, message: "Username cannot be more than 20 characters." });
+        }
+    
+        // const usernameRegex = /^[a-zA-Z0-9_]+$/;
+        // if (!usernameRegex.test(username)) {
+        //     return res.status(400).json({ available: false, message: "Username contains invalid characters." });
+        // }
+
+
+        // Check if the username is the current user's existing username
+        if (req.user.username === username) {
+            return res.status(200).json({ available: true, message: "This is your current username." });
+        }
+
+        const existingUser = await User.findOne({ username: username });
+
+        if (existingUser) {
+            return res.status(200).json({ available: false, message: "Username is already taken." });
+        }
+
+        res.status(200).json({ available: true, message: "Username is available." });
+
+    } catch (error) {
+        console.error("Error in checkUsernameAvailability:", error.message);
+        res.status(500).json({ available: false, message: "Error checking username availability." });
+    }
+};
+```
+[View on GitHub](https://github.com/shinymack/Chat-App-MERN/blob/main/backend/src/controllers/auth.controller.js#L117-L140)
+
+## Key Integration Points
+
+*   **`backend/src/routes/auth.route.js`**: This file defines all authentication-related API endpoints. It integrates controllers for business logic and middleware for protection.
+*   **`backend/src/controllers/auth.controller.js`**: Contains the core logic for user registration, login, logout, profile updates, and Google OAuth callbacks. It interacts with the `User` model and utility functions like `generateToken`.
+*   **`backend/src/lib/passport.config.js`**: Centralizes the Passport.js configuration for Google OAuth, including strategy setup and user serialization/deserialization.
+*   **`backend/src/middleware/auth.middleware.js`**: Provides the `protectRoute` middleware, crucial for securing API endpoints by verifying JWTs and attaching user data to requests.
+
+The authentication and authorization system is designed for security and scalability, offering multiple authentication methods and clear access control mechanisms. The use of JWTs and HTTP-only cookies ensures that user sessions are managed effectively while mitigating common web vulnerabilities.

@@ -1,0 +1,174 @@
+---
+title: "Page Structures and Routing"
+description: "Details on how different pages are structured, their routes, and data fetching within the Next.js app directory."
+sidebar_position: 21
+---
+ # Page Structures and Routing
+
+This document details the architectural patterns for page structures, routing, and data management within the Next.js `app` directory. We explore how different content types are presented, how dynamic routes are handled, and the mechanisms for server-side data fetching and caching. The application leverages a clear directory structure to define routes, with each page responsible for its own data requirements and rendering logic.
+
+## Front-Facing Content Pages
+
+The `(front)` route group in `src/app` encapsulates the primary user-facing sections of the application. This organizational pattern allows for shared layouts or middleware across these routes while maintaining a clean URL structure without including `(front)` in the URL path.
+
+### Anime Overview Page
+
+The `src/app/(front)/anime/page.tsx` file defines the main Anime page, serving as a hub for various anime-related content. This page aggregates different categories of anime TV shows and movies, presenting them through dedicated components.
+
+The page uses `revalidate = 3600;` to ensure that data fetched by the page is revalidated at most every hour, balancing freshness with performance. The data fetching strategy involves making multiple requests to `MovieService` to retrieve categorized lists of anime.
+
+```typescript
+// src/app/(front)/anime/page.tsx
+// Relevant lines: 18-59
+const requests: ShowRequest[] = [
+  {
+    title: 'Anime TV Shows Latest',
+    req: { requestType: RequestType.ANIME_LATEST, mediaType: MediaType.TV },
+    visible: true,
+  },
+  {
+    title: 'Anime TV Shows Trending',
+    req: {
+      requestType: RequestType.ANIME_TRENDING,
+      mediaType: MediaType.TV,
+    },
+    visible: true,
+  },
+  // ... more requests for top-rated, Netflix, and anime movies
+  {
+    title: 'Anime Movies Latest',
+    req: {
+      requestType: RequestType.ANIME_LATEST,
+      mediaType: MediaType.MOVIE,
+    },
+    visible: true,
+  },
+  {
+    title: 'Anime Movies Top Rated',
+    req: {
+      requestType: RequestType.ANIME_TOP_RATED,
+      mediaType: MediaType.MOVIE,
+    },
+    visible: true,
+  },
+];
+let allShows = await MovieService.getShows(requests);
+allShows = allShows.map((category: CategorizedShows) => {
+  return {
+    ...category,
+    shows: category.shows.map((show: Show) => {
+      return {
+        ...show,
+        media_type: category.title.includes('Movies')
+          ? MediaType.MOVIE
+          : MediaType.TV,
+      };
+    }),
+  };
+});
+const randomShow: Show | null = getRandomShow(allShows);
+```
+[View on GitHub](https://github.com/lande26/LandeMon/blob/main/src/app/(front)/anime/page.tsx#L18-L59)
+
+The `MovieService.getShows` method is a critical component for fetching diverse categories of shows based on defined `ShowRequest` objects. After fetching, a post-processing step ensures that the `media_type` of individual shows correctly reflects whether they are movies or TV series, based on the category title. A `randomShow` is also selected to be featured in a `Hero` component, providing a dynamic highlight to the page.
+
+### Dynamic Movie Detail Pages
+
+The `src/app/(front)/movies/[slug]/page.tsx` file is responsible for handling dynamic routing for individual movie detail pages. The `[slug]` segment in the file path indicates a dynamic route parameter, where `slug` will capture the unique identifier for a movie.
+
+This page leverages Next.js's `generateMetadata` function to dynamically create SEO-friendly metadata for each movie. The `handleMetadata` utility function is used to construct the title and description based on the movie's slug and type.
+
+```typescript
+// src/app/(front)/movies/[slug]/page.tsx
+// Relevant lines: 11-14
+export async function generateMetadata({ params }: Props): Promise<Metadata> {
+  return handleMetadata(params.slug, 'movies', 'movie');
+}
+```
+[View on GitHub](https://github.com/lande26/LandeMon/blob/main/src/app/(front)/movies/[slug]/page.tsx#L11-L14)
+
+Interestingly, this dynamic route's default export (`export default async function Home()`) simply re-renders the `MoviePage` component, which is assumed to be defined at the parent `../page.tsx` level or handled by a component that consumes the `params` from the route. This pattern suggests a common UI/logic component is used for both the generic movie listing and specific movie details, potentially using the `slug` to fetch specific data within `MoviePage`.
+
+### Search Functionality
+
+The `src/app/(front)/search/page.tsx` handles search queries, allowing users to find specific movies or shows. It retrieves the search query from the URL's `searchParams`.
+
+A critical aspect of this page is its input validation and redirection logic. If the search query (`q`) is empty or contains only whitespace, the user is redirected to the `/home` page, preventing unnecessary empty searches.
+
+```typescript
+// src/app/(front)/search/page.tsx
+// Relevant lines: 14-17
+export default async function SearchPage({ searchParams }: SearchProps) {
+  if (!searchParams?.q?.trim()?.length) {
+    redirect('/home');
+  }
+  const shows = await MovieService.searchMovies(searchParams.q);
+  return <SearchContainer query={searchParams.q} shows={shows.results} />;
+}
+```
+[View on GitHub](https://github.com/lande26/LandeMon/blob/main/src/app/(front)/search/page.tsx#L14-L17)
+
+Upon a valid query, `MovieService.searchMovies` is called to fetch search results, which are then rendered by the `SearchContainer` component. This page also uses `revalidate = 3600;` for caching search results, which can be beneficial for popular or repeated queries.
+
+## Content Playback Pages
+
+For direct content consumption, a separate route group, `src/app/watch`, is established. This clear separation ensures that the playback experience is distinct from content discovery and browsing.
+
+### Dynamic Anime Playback
+
+The `src/app/watch/anime/[slug]/page.tsx` file is dedicated to playing specific anime content. Similar to movie detail pages, it uses a dynamic `[slug]` parameter to identify the content to be played.
+
+The `slug` in this context is parsed to extract the unique ID for the anime. This ID is then used to construct an embed URL for a third-party player, `vidsrc.cc`. The `EmbedPlayer` component encapsulates the logic for displaying the embedded video player.
+
+```typescript
+// src/app/watch/anime/[slug]/page.tsx
+// Relevant lines: 9-15
+export default function Page({ params }: { params: { slug: string } }) {
+  const id = params.slug.split('-').pop(); // Extracts numerical ID from slug
+  const movieId: string | undefined = params.slug.split('/').pop(); // Full slug as movieId
+  return (
+    <EmbedPlayer
+      movieId={movieId}
+      mediaType={movieId?.includes('t') ? MediaType.ANIME : undefined}
+      url={`https://vidsrc.cc/v2/embed/anime/tmdb${id}/1/sub?autoPlay=false`}
+    />
+  );
+}
+```
+[View on GitHub](https://github.com/lande26/LandeMon/blob/main/src/app/watch/anime/[slug]/page.tsx#L9-L15)
+
+The `revalidate = 3600;` on this page signifies that while the playback component itself might be static, the page definition and potentially underlying data (if any) are subject to hourly revalidation.
+
+## Key Integration Points
+
+The routing and page structure design emphasizes modularity and clear responsibility for each page. Data fetching is primarily handled server-side within `async` page components, leveraging Next.js's server components model.
+
+Here's a high-level flow of how a user might interact with the application, from discovery to playback:
+
+
+
+
+
+```mermaid
+graph TD
+    A["User Navigates to /anime"] --> B["AnimePage (Server Component)"]
+    B --> C{ "MovieService.getShows(requests)" }
+    C --> D["Fetch Anime TV Shows/Movies"]
+    D --> E["Render Hero & ShowsContainer"]
+    E --> F["User Clicks on a Movie/Show"]
+    F --> G["Navigates to /movies/[slug]"]
+    G --> H["MoviePage (Server Component)"]
+    H --> I{ "handleMetadata(slug)" }
+    I --> J["Render Movie Details"]
+    J --> K["User Clicks 'Watch Now'"]
+    K --> L["Navigates to /watch/anime/[slug]"]
+    L --> M["EmbedPlayer (Client Component)"]
+    M --> N["Stream Content from Third-Party Embed"]
+```
+
+
+In this flow, server components (`AnimePage`, `MoviePage`) are responsible for initial data fetching and rendering, while client components (`EmbedPlayer`, `Hero`, `ShowsContainer`, `SearchContainer`) handle interactivity and display. The `MovieService` acts as a central data access layer, abstracting the details of external API calls.
+
+The separation of concerns between `(front)` for browsing and `watch` for playback is a strategic choice, allowing for different layouts, security policies, or performance optimizations to be applied to each section without affecting the other. Caching strategies using `revalidate` are applied consistently to enhance performance and reduce server load for frequently accessed data.
+
+The search page exemplifies robust error handling with its redirection for invalid queries, improving user experience by guiding them away from dead ends. The dynamic metadata generation is crucial for SEO, ensuring that content-rich pages are properly indexed and discoverable by search engines.

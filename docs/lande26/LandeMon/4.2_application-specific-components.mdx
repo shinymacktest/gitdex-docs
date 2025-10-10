@@ -1,0 +1,277 @@
+---
+title: "Application-Specific Components"
+description: "Describes specialized components used across the application, like carousels, search bars, and image handling."
+sidebar_position: 42
+---
+ # Application-Specific Components
+
+This section details the specialized, application-specific components that form the backbone of the user interface, enabling interactive and dynamic content delivery. These components handle core functionalities such as displaying hero content, facilitating user searches, managing content carousels, and efficient image rendering.
+
+## Hero Component (`src/components/hero.tsx`)
+
+The `Hero` component is responsible for showcasing a prominent, randomly selected movie or TV show on the homepage. It provides users with immediate engaging content, complete with an image, title, overview, and interactive buttons for playback or detailed information.
+
+### Key Features
+
+*   **Dynamic Content Display:** Fetches and displays details for a `randomShow` prop, including title, vote average, release date, and overview.
+*   **Media Playback & Information Access:** Offers "Play" and "More Info" buttons. The "More Info" button opens a modal with additional details and updates the browser history.
+*   **Browser History Integration:** Utilizes `window.history.pushState` to manage the URL when a modal is opened, allowing for direct linking to show details and proper back button navigation.
+*   **`popstate` Event Handling:** Listens for browser `popstate` events to correctly open or close the modal based on URL changes, ensuring a seamless navigation experience.
+*   **Image Optimization:** Renders images using the `CustomImage` component for performance and responsiveness.
+*   **Search Integration:** Renders `null` if the search query is active (`searchStore.query.length > 0`), ensuring the hero content doesn't interfere with search results.
+
+### Implementation Details
+
+The `Hero` component uses `useEffect` to attach and detach an event listener for `popstate`, which is crucial for handling browser navigation.
+
+```tsx
+React.useEffect(() => {
+  window.addEventListener('popstate', handlePopstateEvent, false);
+  return () => {
+    window.removeEventListener('popstate', handlePopstateEvent, false);
+  };
+}, []);
+```
+
+[View on GitHub](https://github.com/lande26/LandeMon/blob/main/src/components/hero.tsx#L20-L26)
+
+The `handlePopstateEvent` function intelligently determines whether to reset the modal or fetch and display show details based on the current URL.
+
+```tsx
+const handlePopstateEvent = () => {
+  const pathname = window.location.pathname;
+  if (!/\d/.test(pathname)) {
+    modalStore.reset();
+  } else if (/\d/.test(pathname)) {
+    const movieId: number = getIdFromSlug(pathname);
+    if (!movieId) {
+      return;
+    }
+    const findMovie: Promise<AxiosResponse<Show>> = pathname.includes(
+      '/tv-shows',
+    )
+      ? MovieService.findTvSeries(movieId)
+      : MovieService.findMovie(movieId);
+    findMovie
+      .then((response: AxiosResponse<Show>) => {
+        const { data } = response;
+        useModalStore.setState({ show: data, open: true, play: true });
+      })
+      .catch((error) => {
+        console.error(`findMovie: `, error);
+      });
+  }
+};
+```
+
+[View on GitHub](https://github.com/lande26/LandeMon/blob/main/src/components/hero.tsx#L28-L54)
+
+The "More Info" button dynamically updates the URL using `window.history.pushState` before opening the modal, allowing deep linking to specific show pages.
+
+```tsx
+<Button
+  aria-label="Open show's details modal"
+  variant="outline"
+  className="h-auto flex-shrink-0 gap-2 rounded-xl"
+  onClick={() => {
+    const name = getNameFromShow(randomShow);
+    const path: string =
+      randomShow.media_type === MediaType.TV
+        ? 'tv-shows'
+        : 'movies';
+    window.history.pushState(
+      null,
+      '',
+      `${path}/${getSlug(randomShow.id, name)}`,
+    );
+    useModalStore.setState({
+      show: randomShow,
+      open: true,
+      play: true,
+    });
+  }}>
+  <Icons.info aria-hidden="true" />
+  More Info
+</Button>
+```
+
+[View on GitHub](https://github.com/lande26/LandeMon/blob/main/src/components/hero.tsx#L125-L149)
+
+### Hero Component Flow
+
+
+
+
+
+```mermaid
+graph TD
+    A["User Navigates to Homepage"] --> B{?"Search Query Active"?};
+    B -- "Yes" --> C["Hero Component Renders Null"];
+    B -- "No" --> D["Hero Component Renders randomShow"];
+    D --> E["Display Title, Overview, Image"];
+    E --> F{"User Interaction"};
+    F -- "Click 'Play'" --> G["Navigate to Watch Page"];
+    F -- "Click 'More Info'" --> H["Update URL with pushState"];
+    H --> I["Open Show Details Modal"];
+    I --> J{"User Clicks Browser Back"};
+    J --> K["'popstate' Event Fired"];
+    K --> L{"Check URL for Show ID"};
+    L -- "ID Found" --> M["Fetch Show Details"];
+    M --> I;
+    L -- "No ID" --> N["Close Modal"];
+```
+
+
+
+## Search Input Component (`src/components/search-input.tsx`)
+
+The `SearchInput` component provides a stylized input field for users to search for movies or TV shows. It integrates a search icon and uses a rounded design for a consistent UI.
+
+### Key Features
+
+*   **Integrated Search Icon:** A `Search` icon from `lucide-react` is positioned within the input field.
+*   **Custom Styling:** Utilizes a custom `Input` component (likely from a UI library like Shadcn UI) with `rounded-full` styling.
+*   **Placeholder Text:** Guides the user with "Search movie" as a placeholder.
+
+### Implementation Details
+
+The component is a straightforward wrapper around an `Input` element, enhancing it with an icon for visual clarity.
+
+```tsx
+import { Search } from "lucide-react";
+import React from "react";
+import { Input } from "@/components/ui/input";
+
+export default function SearchInput() {
+  return (
+    <div className="relative w-full">
+      <Search className="absolute left-3 top-3 h-4 w-4 text-slate-600" />
+      <Input className="rounded-full pl-9" placeholder="Search movie" />
+    </div>
+  );
+}
+```
+
+[View on GitHub](https://github.com/lande26/LandeMon/blob/main/src/components/search-input.tsx#L1-L10)
+
+## Shows Carousel Component (`src/components/shows-carousel.tsx`)
+
+The `ShowsCarousel` component displays a horizontal, scrollable list of `Show` items (movies or TV series). It's designed to showcase multiple content items in a visually appealing and navigable format, common for categories like "Trending Now" or "Continue Watching."
+
+### Key Features
+
+*   **Horizontal Scrolling:** Allows users to scroll through a collection of shows.
+*   **Navigation Buttons:** Provides "Scroll Left" and "Scroll Right" buttons for precise control over carousel movement. These buttons wrap around, allowing continuous scrolling.
+*   **Responsive Display:** Adapts the number of visible cards based on screen size using CSS grid properties.
+*   **`ShowCard` Integration:** Renders each show within a `ShowCard` sub-component, which handles individual show display and interaction.
+*   **Modal Integration:** Clicking on a `ShowCard` opens the details modal for that specific show and updates the browser history.
+
+### Implementation Details
+
+The carousel uses a `div` with `overflow-x-auto` for scrolling and dynamically adjusts the scroll position using JavaScript.
+
+```tsx
+const scrollToDirection = (direction: 'left' | 'right') => {
+  if (!showsRef.current) return;
+
+  setIsScrollable(true);
+  const { scrollLeft, offsetWidth } = showsRef.current;
+  const handleSize = offsetWidth > 1400 ? 60 : 0.04 * offsetWidth;
+  const offset =
+    direction === 'left'
+      ? scrollLeft - (offsetWidth - 2 * handleSize)
+      : scrollLeft + (offsetWidth - 2 * handleSize);
+  showsRef.current.scrollTo({ left: offset, behavior: 'smooth' });
+
+  if (scrollLeft === 0 && direction === 'left') {
+    showsRef.current.scrollTo({
+      left: showsRef.current.scrollWidth,
+      behavior: 'smooth',
+    });
+  } else if (
+    scrollLeft + offsetWidth === showsRef.current.scrollWidth &&
+    direction === 'right'
+  ) {
+    showsRef.current.scrollTo({
+      left: 0,
+      behavior: 'smooth',
+    });
+  }
+};
+```
+
+[View on GitHub](https://github.com/lande26/LandeMon/blob/main/src/components/shows-carousel.tsx#L25-L49)
+
+The `ShowCard` component handles the rendering of individual show posters and integrates with the modal store.
+
+```tsx
+export const ShowCard = ({ show }: { show: Show; pathname: string }) => {
+  const imageOnErrorHandler = (
+    event: React.SyntheticEvent<HTMLImageElement, Event>,
+  ) => {
+    event.currentTarget.src = '/images/grey-thumbnail.jpg';
+  };
+
+  return (
+    <picture className="relative aspect-[2/3]">
+      <a
+        className="pointer-events-none"
+        aria-hidden={false}
+        role="link"
+        aria-label={getNameFromShow(show)}
+        href={`/${show.media_type}/${getSlug(show.id, getNameFromShow(show))}`}
+      />
+      <CustomImage
+        src={
+          show.poster_path ?? show.backdrop_path
+            ? `https://image.tmdb.org/t/p/w500${
+                show.poster_path ?? show.backdrop_path
+              }`
+            : '/images/grey-thumbnail.jpg'
+        }
+        alt={show.title ?? show.name ?? 'poster'}
+        className="h-full w-full cursor-pointer rounded-lg px-1 transition-all md:hover:scale-110"
+        fill
+        sizes="(max-width: 768px) 50vw, (max-width: 1200px) 100vw, 33vw"
+        style={{
+          objectFit: 'cover',
+        }}
+        onClick={() => {
+          const name = getNameFromShow(show);
+          const path: string =
+            show.media_type === MediaType.TV ? 'tv-shows' : 'movies';
+          window.history.pushState(
+            null,
+            '',
+            `${path}/${getSlug(show.id, name)}`,
+          );
+          useModalStore.setState({
+            show: show,
+            open: true,
+            play: true,
+          });
+        }}
+        onError={imageOnErrorHandler}
+      />
+    </picture>
+  );
+};
+```
+
+[View on GitHub](https://github.com/lande26/LandeMon/blob/main/src/components/shows-carousel.tsx#L85-L135)
+
+## TMDB Image Component (`src/components/tmdb-image.tsx`)
+
+The `tmdb-image.tsx` file appears to be a placeholder or an experimental component that was not fully implemented or integrated into the current application. The provided code is entirely commented out, indicating that its functionality for generating responsive `<img>` tags with `next/image`'s `getImgProps` was either abandoned or moved to another utility (likely the `CustomImage` component used by `Hero` and `ShowCard`).
+
+**Status:** This component is currently inactive and does not contribute to the application's runtime behavior. Its presence suggests an initial exploration into responsive image handling which might have been superseded by a custom solution or a different approach.
+
+## Key Integration Points
+
+These application-specific components demonstrate tight integration with state management (`useModalStore`, `useSearchStore`), routing (`next/navigation`, `window.history`), and utility functions (`getNameFromShow`, `getSlug`).
+
+*   **Modal Management:** Both `Hero` and `ShowCard` components interact with `useModalStore` to display detailed show information in a centralized modal. This pattern ensures a consistent user experience when viewing content details.
+*   **URL Synchronization:** The use of `window.history.pushState` across both `Hero` and `ShowCard` components is critical for maintaining deep-linkable URLs and ensuring the browser's back/forward functionality works intuitively with the modal system. This avoids a common pitfall where modals break browser navigation.
+*   **Search Interoperability:** The `Hero` component gracefully steps aside when a search query is active, preventing redundant content display and prioritizing the search results.
+*   **Image Handling:** The `CustomImage` component is crucial for efficient and responsive image loading, leveraging Next.js's image optimization capabilities to improve perceived performance and core web vitals.
+*   **Reusability:** The `ShowCard` component is extracted for reusability within the `ShowsCarousel`, promoting a modular design and reducing code duplication.

@@ -1,0 +1,206 @@
+---
+title: "Switch-Controlled Motor"
+description: "Explains the switch-controlled motor implementation and its functionality."
+sidebar_position: 22
+---
+# Switch-Controlled Motor
+
+This document details the implementation of the switch-controlled motor functionality for the SRA-VJTI Wall-E robot. It explains how the robot's motors are controlled based on input from line sensor array (LSA) switches, utilizing the TB6612FNG motor drivers in normal mode.
+
+## Motor Driver Modes
+
+The SRA board employs two TB6612FNG motor drivers, enabling control of up to four motors. These drivers operate in two distinct modes: Normal mode and Parallel mode. This documentation focuses on the Normal mode implementation.
+
+### Normal Mode
+
+In normal mode, each TB6612FNG driver controls two motors independently. This configuration allows for precise control over each motor using dedicated GPIO pins.
+
+<Mermaid>
+graph TD
+    subgraph "tb6612fng_driver_1"
+    a["Motor 1"]
+    b["Motor 2"]
+    end
+
+    subgraph "tb6612fng_driver_2"
+    c["Motor 3"]
+    d["Motor 4"]
+    end
+
+    lsa1["LSA Input 1"] -->|"Control Signal 1"| a
+    lsa2["LSA Input 2"] -->|"Control Signal 2"| b
+    lsa3["LSA Input 3"] -->|"Control Signal 3"| c
+    lsa4["LSA Input 4"] -->|"Control Signal 4"| d
+</Mermaid>
+
+Each motor's direction and speed are determined by the state of two input pins (IN1 and IN2) on the TB6612FNG driver. A truth table summarizes the behavior:
+
+| IN2\IN1 | High                | Low                 |
+| :------ | :------------------ | :------------------ |
+| High    | Move motor forward  | Move motor forward  |
+| Low     | Move motor backward | Stop Motor          |
+
+In normal mode, each motor channel has a current capacity of 1.2A.
+
+## Working Principle
+
+The switch-controlled motor implementation involves:
+
+1.  **Activating GPIO switches:** Configuring the GPIO pins connected to the LSA switches to receive input.
+2.  **Activating TB6612FNG drivers:** Initializing the motor drivers for operation.
+3.  **Reading LSA input:** Continuously monitoring the state of the LSA switches.
+4.  **Controlling motors:** Adjusting the speed and direction of the motors based on the LSA input.
+
+## Code Snippets
+
+The core logic is implemented in `switch_control_motor_normal.c`.
+
+### Enabling Switches
+
+The `enable_switches()` function activates the GPIO pins connected to the LSA switches.
+
+```c
+#include "sra_board.h"
+
+void drive_task(void *arg)
+{
+	enable_switches();
+	// ... rest of the code
+}
+```
+
+[View on GitHub](https://github.com/SRA-VJTI/Wall-E/blob/master/4_switch_controlled_motor_normal/main/switch_control_motor_normal.c)
+
+This function is crucial for configuring the input mechanism of the robot. More details are available in the `sra-board-component` library.
+
+### Enabling Motor Drivers
+
+The `enable_motor_driver()` function initializes the TB6612FNG motor drivers.
+
+```c
+motor_handle_t motor_a_0, motor_a_1;
+ESP_ERROR_CHECK(enable_motor_driver(&motor_a_0, MOTOR_A_0));
+ESP_ERROR_CHECK(enable_motor_driver(&motor_a_1, MOTOR_A_1));
+```
+
+[View on GitHub](https://github.com/SRA-VJTI/Wall-E/blob/master/4_switch_controlled_motor_normal/main/switch_control_motor_normal.c)
+
+This step ensures that the motor drivers are ready to receive commands and control the motors. The `motor_handle_t` variables are used to reference the individual motors connected to the driver.
+
+### Reading Switch Input
+
+The `read_switch()` function reads the state of a specific LSA switch.
+
+```c
+if (read_switch(SWITCH_1))
+{
+    // ...
+}
+```
+
+[View on GitHub](https://github.com/SRA-VJTI/Wall-E/blob/master/4_switch_controlled_motor_normal/main/switch_control_motor_normal.c)
+
+This function returns `true` if the switch is active, indicating that the corresponding line sensor has detected a line. The `SWITCH_1` constant represents the GPIO pin number associated with the switch.
+
+### Setting Motor Speed
+
+The `set_motor_speed()` function sets the speed and direction of a motor.
+
+```c
+set_motor_speed(motor_a_0, MOTOR_FORWARD, 80);
+```
+
+[View on GitHub](https://github.com/SRA-VJTI/Wall-E/blob/master/4_switch_controlled_motor_normal/main/switch_control_motor_normal.c)
+
+This function takes the motor handle, direction (e.g., `MOTOR_FORWARD`, `MOTOR_BACKWARD`, `MOTOR_STOP`), and speed (duty cycle) as arguments. The speed is a percentage value, with 0 representing stop and 100 representing full speed.
+
+### Main Control Loop
+
+The `drive_task()` function contains the main control loop that continuously monitors the LSA switches and adjusts the motor speeds accordingly.
+
+```c
+void drive_task(void *arg)
+{
+    enable_switches();
+    motor_handle_t motor_a_0, motor_a_1;
+    ESP_ERROR_CHECK(enable_motor_driver(&motor_a_0, MOTOR_A_0));
+    ESP_ERROR_CHECK(enable_motor_driver(&motor_a_1, MOTOR_A_1));
+
+    while (1)
+    {
+        if (read_switch(SWITCH_1))
+        {
+            set_motor_speed(motor_a_0, MOTOR_FORWARD, 80);
+            ESP_LOGI(TAG_SWITCH_CONTROL_MOTOR, "MOTOR_A_0 FORWARD");
+        }
+        else if (read_switch(SWITCH_2))
+        {
+            set_motor_speed(motor_a_0, MOTOR_BACKWARD, 80);
+            ESP_LOGI(TAG_SWITCH_CONTROL_MOTOR, "MOTOR_A_0 BACKWARD");
+        }
+        else
+        {
+            set_motor_speed(motor_a_0, MOTOR_STOP, 0);
+        }
+
+        // Similar logic for SWITCH_3 and SWITCH_4 controlling motor_a_1
+
+        vTaskDelay(100 / portTICK_PERIOD_MS);
+    }
+}
+```
+
+[View on GitHub](https://github.com/SRA-VJTI/Wall-E/blob/master/4_switch_controlled_motor_normal/main/switch_control_motor_normal.c)
+
+This loop continuously reads the LSA inputs, sets the motor speeds based on those inputs, and then pauses briefly before repeating. The `vTaskDelay()` function prevents the loop from consuming too much CPU time.
+
+### Task Creation
+
+The `app_main()` function creates the `drive_task`.
+
+```c
+void app_main()
+{
+    xTaskCreate(&drive_task, "drive_task", 4096, NULL, 1, NULL);
+}
+```
+
+[View on GitHub](https://github.com/SRA-VJTI/Wall-E/blob/master/4_switch_controlled_motor_normal/main/switch_control_motor_normal.c)
+
+This initializes the FreeRTOS task that handles the motor control logic. The task is assigned a name, stack size, priority, and a pointer to the `drive_task` function.
+
+## Control Flow
+
+<Mermaid>
+flowchart LR
+    a["Start"] --> b("Enable Switches");
+    b --> c("Enable Motor Driver A_0");
+    c --> d("Enable Motor Driver A_1");
+    d --> e{{"Read Switch 1"}};
+    e -- "Yes" --> f("Motor A_0 Forward");
+    e -- "No" --> g{{"Read Switch 2"}};
+    g -- "Yes" --> h("Motor A_0 Backward");
+    g -- "No" --> i("Motor A_0 Stop");
+    f --> j("Delay");
+    h --> j;
+    i --> j;
+    j --> e;
+</Mermaid>
+
+## Key Integration Points
+
+The switch-controlled motor implementation relies heavily on the `sra-board-component` library, which provides functions for enabling switches and motor drivers. This modularity allows for easy integration and reuse of code.
+
+**Flow:**
+
+1.  The robot's line sensors detect lines on the track.
+2.  The LSA switches connected to the line sensors activate.
+3.  The `read_switch()` function detects the active switches.
+4.  The `set_motor_speed()` function sets the motor speeds based on the active switches, guiding the robot along the track.
+
+**Best Practices:**
+
+*   Use descriptive variable names and comments to improve code readability.
+*   Implement error handling to gracefully handle unexpected situations.
+*   Optimize the motor control algorithm for smoother and more accurate robot movement.
+*   Thoroughly test the code in a simulated environment before deploying it on the physical robot.

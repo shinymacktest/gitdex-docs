@@ -1,0 +1,143 @@
+---
+title: "MPU Module"
+description: "Details of the MPU module."
+sidebar_position: 33
+---
+ # MPU Module
+
+The MPU (Motion Processing Unit) module is a crucial component for gathering orientation and movement data within the SRA-VJTI Wall-E project. This documentation details the MPU6050, its functionalities, integration, and associated code snippets.
+
+## MPU6050
+
+The MPU6050 is a 6-axis motion tracking device that integrates a MEMS gyroscope and a MEMS accelerometer. It communicates via a standard I2C bus, simplifying its integration with the ESP32. This module is essential for determining the Wall-E robot's orientation and movement. The MPU6050's I2C address is typically 0x68 but can be changed to 0x69. Being a 3.3V device, it can be directly connected to the ESP32 pins.
+
+## Inertial Measurement Unit
+
+An Inertial Measurement Unit (IMU) such as the MPU6050 provides information on an object's orientation by combining a gyroscope (measuring angular rate) and an accelerometer (measuring linear acceleration). Some IMUs also include a compass (magnetometer). The number of sensor inputs is referred to as ‘DoF’ (Degrees of Freedom). A 6-DOF IMU consists of a 3-axis gyroscope and a 3-axis accelerometer.
+
+## Initialising MPU6050
+
+Initialising the MPU6050 involves enabling the device and configuring its operational mode. The MPU6050 starts in SLEEP mode upon power-up; hence, it's necessary to disable this mode. This is achieved by writing the value 0 to the PWR_MGMT_1 register (0x6b).
+
+The following steps are involved:
+1.  Send a start sequence.
+2.  Send the I2C address (0x68) of the MPU6050 with the R/W bit high.
+3.  Send the internal register number you want to write to (0x6b : PWR_MGMT_1).
+4.  Send the data byte (0x00) - This will power on the device.
+5.  Send the stop sequence.
+
+```c
+    esp_err_t enable_mpu6050()	
+    ```
+    **Description** : MPU6050 comes up in sleep mode upon power-up . It disables the SLEEP_MODE of the MPU by accessing the POWER_MANAGEMENT_1 register
+         and checks if the MPU is initialised correctly.	
+
+    **Parameters** :
+    * `None` 
+
+    **Returns** : esp_err_t returns ESP_OK if MPU is enabled properly.
+
+[View on GitHub](https://github.com/SRA-VJTI/Wall-E/blob/main/3_MPU/main/main.c)
+
+This function, `enable_mpu6050()`, [View on GitHub](https://github.com/SRA-VJTI/Wall-E/blob/main/3_MPU/main/main.c) is responsible for taking the MPU6050 out of sleep mode by writing to the appropriate register.
+
+## Accelerometer
+
+The accelerometer measures linear acceleration using MEMS technology. It outputs the acceleration in m/s², measuring g-forces on a body. The MPU6050's MEMS accelerometer uses stationary and movable electrodes that act as capacitor plates. Changes in acceleration cause the displacement of these plates, resulting in a change in capacitance. From this change, the acceleration value is derived.
+
+## Reading Accelerometer Data
+
+Accelerometer data, representing acceleration along the X, Y, and Z axes, is stored in register pairs within the MPU6050. Each register is 8 bits. The MSB and LSB bytes are combined to form a 16-bit value, which is then converted into a floating-point number representing acceleration. The data is read in a burst using the [reading register data](#reading-register-data) method.
+
+## Accelerometer Euler Angles
+
+Roll and pitch angles are calculated from the accelerometer data using the following formula:
+
+$$\theta = \arctan\left(\frac{A_{X.OUT}}{A_{Y.OUT}}\right)$$
+
+This formula is used to calculate the roll and pitch angles, providing the orientation of the device based on the acceleration data.
+
+## Gyroscope
+
+The gyroscope measures the change in angular velocity, tracking the device's rotation around its axes. The MPU6050 utilizes a MEMS gyroscope that operates based on the Coriolis effect.
+
+## Reading Gyroscope Data
+
+Similar to the accelerometer, gyroscope data for the X, Y, and Z axes is stored in register pairs (MSB and LSB) and read as 16-bit values. The raw gyroscope readings are converted to degrees of rotation by dividing by a sensitivity factor (approximately 131). Euler angles are then calculated by integrating these raw readings over time.
+
+## Complementary Filter
+
+Due to the drift inherent in gyroscopes, a complementary filter is employed to fuse gyroscope and accelerometer data. This filter minimizes drift by combining both sensor readings in a weighted average. The alpha value, a key factor in the filter, is determined experimentally.
+
+
+
+
+
+```mermaid
+graph TD
+    A["Accelerometer Data"] --> B{ "Calculate Roll/Pitch Angles" }
+    C["Gyroscope Data"] --> D{ "Integrate Angular Velocity" }
+    B --> E["Complementary Filter"]
+    D --> E
+    E --> F["Filtered Euler Angles (Roll/Pitch)"]
+```
+
+
+
+## Reading Register Data
+
+Data is read from the MPU6050 through the I2C bus. The master (ESP32) first sends a START condition, followed by the MPU6050's I2C address with the R/W bit low (to write the register address). Then the internal register address is written. After this, a repeated start is sent, and the I2C address is sent again, but this time with the R/W bit high (to read). The specified number of bytes are then read from the register, followed by a STOP condition.
+
+```c
+  esp_err_t read_mpu6050(euler_angle, mpu_offset)
+  ```
+
+  **Description** : Calculates the Roll and Pitch angles of the bot by applying complementary filter to the raw accelerometer and gyroscope values and using the given MPU offset. It stores the Roll angle in euler_angle[0] and the Pitch engle in euler_angle[1].
+
+  **Parameters** : 
+  * `euler_angle` : Array to store euler angles , Pitch and Roll.
+  * `mpu_offset` : Array to specify MPU offsets , Pitch offset ( About Y-axis ) and Roll offset (About X-axis).
+
+
+  **Returns** : esp_err_t returns ESP_OK if it read mpu successfully, else it returns ESP_FAIL.
+
+[View on GitHub](https://github.com/SRA-VJTI/Wall-E/blob/main/3_MPU/main/main.c)
+
+This function, `read_mpu6050()`, [View on GitHub](https://github.com/SRA-VJTI/Wall-E/blob/main/3_MPU/main/main.c) is responsible for calculating the roll and pitch angles using the accelerometer and gyroscope data.
+
+## Description of Functions Used
+
+-   `enable_mpu6050()`: This function initializes the MPU6050 by disabling its sleep mode and verifying its successful initialisation.
+-   `read_mpu6050(euler_angle, mpu_offset)`: This function calculates the roll and pitch angles of the robot using the accelerometer and gyroscope data. It applies a complementary filter and accounts for MPU offsets to provide stable orientation readings.
+
+## Flowchart of Code
+
+
+
+
+
+```mermaid
+flowchart LR
+    A["Start"] --> B{ "Initialise MPU6050" }
+    B --> C{ "Check if MPU Initialised Successfully?" }
+    C -- Yes --> D{ "Read Accelerometer and Gyroscope Data" }
+    D --> E{ "Calculate Roll and Pitch Angles using Complementary Filter" }
+    E --> F{ "Display Euler Angles on OLED" }
+    F --> G{ "Log Euler Angles" }
+    G --> D
+    C -- No --> H["Log MPU Initialisation Failure"]
+    H --> I["End"]
+    D --> H
+    I --> I
+```
+
+
+
+## Key Integration Points
+
+The MPU module integrates the MPU6050 sensor to determine the Wall-E robot's orientation. The primary flow involves initialising the MPU6050, reading raw accelerometer and gyroscope data, and calculating the roll and pitch angles. The complementary filter is crucial for fusing the accelerometer and gyroscope readings to provide stable and accurate orientation data. This data is then displayed on the OLED screen and logged for monitoring.
+
+Best practices include:
+1.  Error handling: Implement robust error checking to ensure the MPU6050 is initialised correctly.
+2.  Calibration: Calibrate the MPU6050 to reduce sensor bias.
+3.  Filtering: Apply appropriate filtering techniques to reduce noise and improve accuracy.

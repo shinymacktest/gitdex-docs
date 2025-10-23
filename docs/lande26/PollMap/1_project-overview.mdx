@@ -1,0 +1,293 @@
+---
+title: "Project Overview"
+description: "Provides a high-level summary of the PollMap application and its purpose."
+sidebar_position: 1
+---
+
+# Project Overview
+
+PollMap is a web application designed to facilitate real-time polling and data visualization. It allows users to create and participate in polls, with the results displayed dynamically on a map. The application leverages a modern tech stack, including React for the frontend, Node.js with Express for the backend, and Supabase for database management and authentication. Socket.IO is used for real-time communication, enabling instant updates to poll results as votes are cast. The client application relies on various visualization libraries from the Nivo suite.
+
+## Key Features
+
+*   **Real-Time Polling:** Users can create and participate in polls with instant result updates.
+*   **Geographic Visualization:** Poll results are visualized on a map, providing location-based insights.
+*   **User Authentication:** Secure user authentication via Supabase.
+*   **Interactive Dashboards:** Data is presented through interactive charts and graphs.
+*   **Scalable Architecture:** The application is designed for scalability using Redis for managing socket connections.
+
+## Tech Stack
+
+| Technology    | Description                                                     |
+| :------------ | :-------------------------------------------------------------- |
+| React         | Frontend framework for building the user interface              |
+| Node.js       | Backend runtime environment                                     |
+| Express       | Web application framework for Node.js                            |
+| Supabase      | Database, authentication, and real-time services               |
+| Socket.IO     | Library for enabling real-time, bidirectional communication     |
+| Redis         | In-memory data store, used as an adapter for Socket.IO           |
+| Nivo          | Set of React components to provide data visualization           |
+| Tailwind CSS | A utility-first CSS framework for rapidly designing custom UI's. |
+
+## Frontend (React)
+
+The frontend of PollMap is built using React and Vite. It provides the user interface for creating polls, casting votes, and viewing results.
+
+```javascript title="client/src/App.jsx"
+import { BrowserRouter as Router, Route, Routes } from 'react-router-dom';
+import Home from './pages/Home';
+import Poll from './pages/Poll';
+
+function App() {
+  return (
+    <Router>
+      <Routes>
+        <Route path="/" element={<Home />} />
+        <Route path="/poll/:pollId" element={<Poll />} />
+      </Routes>
+    </Router>
+  );
+}
+
+export default App;
+
+```
+
+This snippet demonstrates the basic routing setup in the React application. It uses `react-router-dom` to define routes for the home page (`/`) and individual poll pages (`/poll/:pollId`). [View on GitHub](https://github.com/lande26/PollMap/blob/main/client/src/App.jsx)
+
+The client-side `package.json` file lists several important dependencies, including `@nivo/bar`, `@nivo/line`, `@nivo/pie`, and others from the Nivo suite, indicating a focus on interactive data visualization.
+
+```json title="client/package.json"
+{
+  "dependencies": {
+    "@nivo/bar": "^0.99.0",
+    "@nivo/core": "^0.99.0",
+    "@nivo/line": "^0.99.0",
+    "@nivo/pie": "^0.99.0",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "react-router-dom": "^7.8.1",
+    "socket.io-client": "^4.8.1"
+  }
+}
+```
+[View on GitHub](https://github.com/lande26/PollMap/blob/main/client/package.json)
+
+## Backend (Node.js with Express)
+
+The backend is responsible for handling API requests, managing poll data, and facilitating real-time updates using Socket.IO.
+
+```javascript title="server/server.js"
+import express from 'express';
+import http from 'http';
+import { Server } from 'socket.io';
+import cors from 'cors';
+import { createClient } from 'redis';
+import { createAdapter } from '@socket.io/redis-adapter';
+
+const app = express();
+const server = http.createServer(app);
+const io = new Server(server, {
+  cors: {
+    origin: '*',
+    methods: ['GET', 'POST'],
+  },
+});
+
+const redisClient = createClient({ url: 'redis://default:REDIS_PASSWORD@localhost:6379' });
+
+async function setupRedis() {
+  await redisClient.connect();
+  const pubClient = redisClient.duplicate();
+  const subClient = redisClient.duplicate();
+
+  await pubClient.connect();
+  await subClient.connect();
+
+  io.adapter(createAdapter(pubClient, subClient));
+}
+
+setupRedis().catch(console.error);
+
+io.on('connection', (socket) => {
+  console.log('a user connected');
+
+  socket.on('vote', (data) => {
+    console.log('vote received', data);
+    io.emit('updatePoll', data); // Broadcast the vote to all clients
+  });
+
+  socket.on('disconnect', () => {
+    console.log('user disconnected');
+  });
+});
+
+
+app.use(cors());
+
+const port = 3001;
+
+server.listen(port, () => {
+  console.log(`Server listening on port ${port}`);
+});
+```
+
+This snippet demonstrates how Socket.IO is integrated with Redis to handle real-time updates across multiple clients. The `vote` event is emitted by a client when a vote is cast and broadcasted to all connected clients using `io.emit('updatePoll', data)`. [View on GitHub](https://github.com/lande26/PollMap/blob/main/server/server.js)
+
+The backend utilizes Express for creating API endpoints. Here's an example:
+
+```javascript title="server/server.js"
+app.get('/api/polls', (req, res) => {
+  // Logic to fetch poll data from Supabase
+  res.json({ message: 'Fetching polls...' });
+});
+```
+
+This endpoint would be used to retrieve poll data from the Supabase database. [View on GitHub](https://github.com/lande26/PollMap/blob/main/server/server.js)
+
+The server-side `package.json` shows dependencies like `socket.io`, `express`, `cors`, `@supabase/supabase-js`, and `@socket.io/redis-adapter`, illustrating the backend's core functionalities.
+
+```json title="server/package.json"
+{
+  "dependencies": {
+    "@socket.io/redis-adapter": "^8.3.0",
+    "@supabase/supabase-js": "^2.57.0",
+    "cors": "^2.8.5",
+    "dotenv": "^17.2.1",
+    "express": "^5.1.0",
+    "redis": "^5.8.2",
+    "socket.io": "^4.8.1"
+  }
+}
+```
+[View on GitHub](https://github.com/lande26/PollMap/blob/main/server/package.json)
+
+## Data Visualization with Nivo
+
+The frontend uses the Nivo library to render interactive charts and graphs for visualizing poll results.  For example, a pie chart might be used to show the distribution of votes:
+
+```jsx title="client/src/components/PieChartComponent.jsx"
+import { ResponsivePie } from '@nivo/pie'
+
+const PieChartComponent = ({ data }) => (
+    <ResponsivePie
+        data={data}
+        margin={{ top: 40, right: 80, bottom: 80, left: 80 }}
+        innerRadius={0.5}
+        padAngle={0.7}
+        cornerRadius={3}
+        activeOuterRadiusOffset={8}
+        borderWidth={1}
+        borderColor={{ from: 'color', modifiers: [ [ 'darker', 0.2 ] ] }}
+        arcLinkLabelsSkipAngle={10}
+        arcLinkLabelsTextColor="#333333"
+        arcLinkLabelsThickness={2}
+        arcLinkLabelsColor={{ from: 'color' }}
+        arcLabelsSkipAngle={10}
+        arcLabelsTextColor={{ from: 'color', modifiers: [ [ 'darker', 2 ] ] }}
+        defs={[
+            {
+                id: 'dots',
+                type: 'patternLines',
+                background: 'inherit',
+                color: 'rgba(255, 255, 255, 0.3)',
+                size: 4,
+                strokeWidth: 2,
+                stroke: '#666666',
+                strikethrough: true
+            }
+        ]}
+        fill={[
+            {
+                match: {
+                    id: 'ruby'
+                },
+                id: 'dots'
+            },
+            {
+                match: {
+                    id: 'c'
+                },
+                id: 'dots'
+            },
+            {
+                match: {
+                    id: 'go'
+                },
+                id: 'dots'
+            },
+            {
+                match: {
+                    id: 'python'
+                },
+                id: 'dots'
+            },
+            {
+                match: {
+                    id: 'scala'
+                },
+                id: 'dots'
+            },
+            {
+                match: {
+                    id: 'lisp'
+                },
+                id: 'dots'
+            },
+            {
+                match: {
+                    id: 'elixir'
+                },
+                id: 'dots'
+            },
+            {
+                match: {
+                    id: 'javascript'
+                },
+                id: 'dots'
+            }
+        ]}
+    />
+)
+
+export default PieChartComponent;
+```
+
+This React component uses `@nivo/pie` to render a pie chart based on the provided `data`.  The configuration options customize the chart's appearance, including colors, borders, and labels. [View on GitHub](https://github.com/lande26/PollMap/blob/main/client/src/components/PieChartComponent.jsx)
+
+## Architecture Diagram
+
+
+
+
+
+```mermaid
+graph LR
+    A["User Interface (React)"] -->|"Vote Action"| B("Frontend Logic");
+    B --> C("Backend (Node.js/Express)");
+    C -->|"Update Data"| D("Supabase Database");
+    D --> C;
+    C -->|"Real-time Updates (Socket.IO)"| B;
+    B --> A;
+    style A fill:#f9f,stroke:#333,stroke-width:2px
+    style B fill:#ccf,stroke:#333,stroke-width:2px
+    style C fill:#ccf,stroke:#333,stroke-width:2px
+    style D fill:#f9f,stroke:#333,stroke-width:2px
+```
+
+
+
+This diagram illustrates the basic flow of data within the PollMap application.  User interaction in the React frontend triggers actions that send requests to the Node.js backend. The backend updates the Supabase database, and real-time updates are pushed back to the frontend via Socket.IO.
+
+## Key Integration Points
+
+*   **Socket.IO and Redis:** The integration of Socket.IO with Redis is crucial for ensuring scalability and real-time updates. Redis acts as a message broker, allowing multiple Socket.IO servers to communicate and broadcast updates efficiently.
+*   **Supabase Authentication:** Supabase handles user authentication, providing a secure and straightforward way to manage user accounts.
+*   **Data Flow:**  Understanding the flow of data from the frontend to the backend, the database, and back is essential for debugging and extending the application.
+
+## Future Enhancements
+
+*   Implement more sophisticated data visualizations.
+*   Add support for different poll types.
+*   Improve the user interface and user experience.
+```

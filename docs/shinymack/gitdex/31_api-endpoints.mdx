@@ -1,0 +1,216 @@
+---
+title: "API Endpoints"
+description: "Details the available API endpoints and their functionalities."
+sidebar_position: 31
+---
+
+---
+title: "API Endpoints"
+description: "Details the available API endpoints and their functionalities."
+sidebar_position: 1
+---
+
+# API Endpoints
+
+This document details the available API endpoints for GitDex, explaining their functionalities, request parameters, and response structures. GitDex uses a RESTful API to provide access to its indexing and documentation services.
+
+## Documentation Retrieval Endpoints
+
+These endpoints are used to retrieve documentation and metadata for repositories that have been indexed by GitDex.
+
+### 1. `GET /api/docs/:owner/:repo/meta.json`
+
+- **Description**: Retrieves the `meta.json` file containing metadata for a specific repository. This metadata is used to configure the documentation display.
+- **Functionality**: This endpoint fetches the `meta.json` file from the documentation storage repository (configured via environment variables `DOCS_REPO_OWNER` and `DOCS_REPO_NAME`). It attempts to parse the content as JSON and returns it. If parsing fails, it returns an empty JSON object. If the file is not found, it returns a 404 error.
+- **Relevant Files**: `server/controllers/docsController.js`
+- **Code Snippet**:
+
+```javascript
+// File: server/controllers/docsController.js
+import { Octokit } from '@octokit/rest';
+
+const octokit = new Octokit({ auth: process.env.GITHUB_TOKEN });
+
+export const getDocController = async (req, res) => {
+  const { owner, repo } = req.params;
+  try {
+    const docsRepoOwner = process.env.DOCS_REPO_OWNER || process.env.GITHUB_USERNAME;
+    const docsRepo = process.env.DOCS_REPO_NAME || 'gitdex-docs';
+
+    const { data: metaData } = await octokit.rest.repos.getContent({
+      owner: docsRepoOwner,
+      repo: docsRepo,
+      path: `docs/${owner}/${repo}/meta.json`,
+      mediaType: { format: 'raw' },
+    });
+
+    try {
+      const parsed = typeof metaData === 'string' ? JSON.parse(metaData) : metaData;
+      return res.json(parsed);
+    } catch (e) {
+      return res.json({});
+    }
+  } catch (error) {
+    return res.status(404).json({ error: 'Doc not found' });
+  }
+};
+```
+
+[View on GitHub](https://github.com/shinymack/gitdex/blob/main/server/controllers/docsController.js)
+
+- **Explanation**:
+    - Uses Octokit to interact with the GitHub API.
+    - Fetches the `meta.json` file as raw content.
+    - Parses the raw content string to JSON or returns an empty object on parsing failure.
+    - Handles file not found errors with a 404 status.
+
+### 2. `GET /api/docs/:owner/:repo/files`
+
+- **Description**: Retrieves the metadata and all files under the specified documentation path.
+- **Functionality**: This endpoint fetches both the `meta.json` file and all files within the `docs/{owner}/{repo}` directory of the documentation repository. It compiles a list of files with their content.
+- **Relevant Files**: `server/controllers/docsController.js`
+- **Code Snippet**:
+
+```javascript
+// File: server/controllers/docsController.js
+export const getDocsFiles = async (req, res) => {
+  const { owner, repo } = req.params;
+  try {
+    const docsRepoOwner = process.env.DOCS_REPO_OWNER || process.env.GITHUB_USERNAME;
+    const docsRepo = process.env.DOCS_REPO_NAME || 'gitdex-docs';
+
+    const { data: metaData } = await octokit.rest.repos.getContent({
+      owner: docsRepoOwner,
+      repo: docsRepo,
+      path: `docs/${owner}/${repo}/meta.json`,
+    });
+
+    const { data: treeData } = await octokit.rest.git.getTree({
+      owner: docsRepoOwner,
+      repo: docsRepo,
+      tree_sha: 'main',
+      recursive: 'true',
+    });
+
+    const docsPath = `docs/${owner}/${repo}/`;
+    const docsFiles = treeData.tree.filter(item => item.path.startsWith(docsPath) && item.type === 'blob');
+
+    const files = await Promise.all(
+      docsFiles.map(async (file) => {
+        const { data } = await octokit.rest.repos.getContent({
+          owner: docsRepoOwner,
+          repo: docsRepo,
+          path: file.path,
+        });
+
+        let content = '';
+        if ('content' in data && typeof data.content === 'string') {
+          content = Buffer.from(data.content, 'base64').toString();
+        }
+        return { path: file.path.replace(docsPath, ''), content };
+      })
+    );
+
+    return res.json({ meta: metaData, files });
+  } catch (error) {
+    console.error('getDocsFiles error', error);
+    return res.status(500).json({ error: 'Failed to fetch docs files' });
+  }
+};
+```
+
+[View on GitHub](https://github.com/shinymack/gitdex/blob/main/server/controllers/docsController.js)
+
+- **Explanation**:
+    - Uses Octokit to fetch metadata and the file tree.
+    - Filters the tree to find files under the documentation path.
+    - Retrieves content for each file, decodes it from Base64, and returns it in the response.
+    - Handles potential errors during file fetching and returns a 500 status.
+
+## Indexing Endpoint
+
+This endpoint is responsible for initiating the indexing process for a given repository.
+
+### 3. `POST /api/index`
+
+- **Description**: Initiates the indexing process for a given repository.
+- **Functionality**: This endpoint triggers the process of analyzing a repository and generating documentation files. It receives a repository URL, fetches relevant files, generates a table of contents, and uploads MDX files to the documentation repository. The indexing process involves using the OpenAI API to generate documentation content.
+- **Relevant Files**: `server/controllers/indexController.js`, `server/routes/indexRoutes.js`
+- **Code Snippet**:
+
+```javascript
+// File: server/controllers/indexController.js
+export const indexController = async (req, res) => {
+    console.log('IndexController: Request received', { repoUrl: req.body.repoUrl });
+
+    try {
+        const result = await processRepository(req.body.repoUrl);
+        res.json(result);
+        console.log('IndexController: Response sent successfully');
+    } catch (error) {
+        console.error('IndexController: Error occurred', error);
+        res.status(500).json({
+            error: 'Failed to index repository',
+            details: error.message
+        });
+    }
+};
+```
+
+[View on GitHub](https://github.com/shinymack/gitdex/blob/main/server/controllers/indexController.js)
+
+- **Explanation**:
+    - Extracts the repository URL from the request body.
+    - Calls `processRepository` function which handles the core indexing logic.
+    - Returns a success message with details about the indexing process or an error message if indexing fails.
+
+## Job Status Endpoints
+
+These endpoints provide information about the status of indexing jobs.
+
+### 4. `GET /api/status/:jobId`
+
+- **Description**: Retrieves the status of a specific indexing job.
+- **Functionality**: This endpoint checks the status of a job by its ID. It is used to track the progress of the indexing process.
+- **Relevant Files**: `server/controllers/jobsController.js`, `server/routes/indexRoutes.js`
+
+### 5. `GET /api/status?owner=&repo=`
+
+- **Description**: Retrieves the status of indexing jobs based on the owner and repository name.
+- **Functionality**: This endpoint allows querying the status of indexing jobs by providing the owner and repository name as query parameters.
+- **Relevant Files**: `server/controllers/jobsController.js`, `server/routes/indexRoutes.js`
+- **Code Snippet**:
+
+```javascript
+// File: server/routes/indexRoutes.js
+import express from "express";
+import { createJob, getJobStatus, getStatusByName } from "../controllers/jobsController.js";
+
+const router = express.Router();
+
+// Replace the existing /index route
+router.post("/index", createJob);
+
+// Add new route for checking job status
+router.get("/status/:jobId", getJobStatus);
+
+// Name-based status check: /api/status?owner=...&repo=...
+router.get('/status', getStatusByName);
+export default router;
+```
+
+[View on GitHub](https://github.com/shinymack/gitdex/blob/main/server/routes/indexRoutes.js)
+
+- **Explanation**:
+    - Defines the route for checking job status using the owner and repository name.
+    - Calls the `getStatusByName` controller function to handle the request.
+
+## Key Integration Points
+
+- **Environment Variables**: Many endpoints rely on environment variables for configuration, such as `GITHUB_TOKEN`, `DOCS_REPO_OWNER`, and `DOCS_REPO_NAME`.
+- **Octokit**: The Octokit library is used extensively for interacting with the GitHub API, including fetching repository contents, creating files, and managing file trees.
+- **Error Handling**: Proper error handling is implemented to return appropriate HTTP status codes and error messages to the client.
+- **Asynchronous Operations**: The API makes heavy use of asynchronous operations to ensure that requests are handled efficiently without blocking the server.
+
+This documentation provides a comprehensive overview of the API endpoints available in GitDex. These endpoints enable the retrieval of documentation, initiation of indexing processes, and tracking of job statuses. Understanding these endpoints is crucial for integrating GitDex with other systems and effectively using its documentation generation capabilities.
+```

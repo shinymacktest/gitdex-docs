@@ -1,0 +1,231 @@
+---
+title: "Data Storage and Management"
+description: "Details how data is stored and managed within the application (e.g., Supabase integration)."
+sidebar_position: 5
+---
+
+# Data Storage and Management
+
+This section details how the `ai-resume-screener` application manages and stores data, primarily leveraging Supabase as its database and backend service. The application uses Supabase to store candidate submissions, application statuses, and other related information. Data integrity and efficient management are crucial for the application's functionality, from resume screening to application tracking.
+
+## Supabase Integration
+
+The application interacts with Supabase through the `@supabase/supabase-js` library. This library provides a client-side and server-side interface for interacting with the Supabase backend, enabling data retrieval, storage, and modification. Configuration for Supabase is centralized, ensuring consistency across both the frontend and backend components.
+
+### Backend Configuration
+
+The backend utilizes Supabase for managing application data, including updating the status of applications.
+
+**File:** `backend/config/supabase.js`
+[View on GitHub](https://github.com/santrupt29/ai-resume-screener/blob/main/backend/config/supabase.js)
+
+```javascript
+import { createClient } from '@supabase/supabase-js';
+import dotenv from 'dotenv';
+dotenv.config();
+
+export const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_ROLE_KEY
+);
+```
+
+**Explanation:**
+
+*   This file configures the Supabase client for the backend. It imports the `createClient` function from the `@supabase/supabase-js` library.
+*   It loads environment variables using `dotenv` to securely manage Supabase credentials.  `SUPABASE_URL` and `SUPABASE_SERVICE_ROLE_KEY` are used to initialize the client.
+*   The `supabase` object is exported, providing access to the Supabase client throughout the backend.  The service role key is used here, enabling privileged access (e.g., for administrative tasks).
+
+### Frontend Configuration
+
+The frontend also interacts with Supabase, primarily for retrieving and displaying application data and handling user interactions.
+
+**File:** `frontend/src/lib/supabase.js`
+[View on GitHub](https://github.com/santrupt29/ai-resume-screener/blob/main/frontend/src/lib/supabase.js)
+
+```javascript
+import {createClient} from '@supabase/supabase-js';
+const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
+const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
+const supabaseServiceRoleKey = import.meta.env.VITE_SUPABASE_SERVICE_ROLE_KEY;
+
+const supabase = createClient(supabaseUrl, supabaseAnonKey);
+
+const supabaseServer = createClient(supabaseUrl, supabaseServiceRoleKey);
+
+export {supabase, supabaseServer};
+```
+
+**Explanation:**
+
+*   This file configures the Supabase client for the frontend. It uses environment variables (accessed via `import.meta.env`) to securely store API keys.
+*   It creates two Supabase clients:
+    *   `supabase`:  Initialized with the anonymous key (`VITE_SUPABASE_ANON_KEY`), used for client-side operations that adhere to Supabase's access control policies.
+    *   `supabaseServer`: Initialized with the service role key (`VITE_SUPABASE_SERVICE_ROLE_KEY`), used in server-side contexts for operations that may require elevated privileges.
+
+### Application Status Updates
+
+The backend exposes an API endpoint to update the status of an application.
+
+**File:** `backend/controllers/updateApplicationStatus.js`
+[View on GitHub](https://github.com/santrupt29/ai-resume-screener/blob/main/backend/controllers/updateApplicationStatus.js)
+
+```javascript
+import { supabase } from '../config/supabase.js';
+
+async function updateApplicationStatus(req, res) {
+  try {
+    const { id } = req.params;
+    const { status } = req.body;
+
+    if (!id || !status) {
+      return res.status(400).json({ error: 'Missing applicationId or status' });
+    }
+
+    console.log(`[DEBUG] Updating application status for ${id} to ${status}`);
+
+    const { data, error, count } = await supabase
+      .from('candidate_submissions')
+      .update({ status })
+      .eq('id', id);
+
+    if (error) {
+      console.error(`[DEBUG] Error updating application status for ${id}:`, error);
+      return res.status(500).json({ error: 'Failed to update application status' });
+    }
+
+    if (count === 0) {
+      return res.status(404).json({ error: 'Application not found' });
+    }
+
+    return res.status(200).json({ message: 'Application status updated successfully' });
+  } catch (error) {
+    console.error('Unexpected error:', error);
+    return res.status(500).json({ error: 'An unexpected error occurred' });
+  }
+}
+export default updateApplicationStatus;
+```
+
+**Explanation:**
+
+*   This controller function updates the status of a candidate's application in the `candidate_submissions` table.
+*   It retrieves the application ID (`id`) from the request parameters and the new status (`status`) from the request body.
+*   It performs input validation to ensure that both `id` and `status` are provided.
+*   It uses the Supabase client (`supabase`) to update the database record. The `.from('candidate_submissions')` method specifies the table, `.update({ status })` sets the new status, and `.eq('id', id)` filters the records based on the application ID.
+*   Error handling is implemented to manage potential issues such as missing parameters, database errors, or the application not being found.
+
+### Frontend Application Data Fetching and Management
+
+The frontend uses React Query to fetch and manage application data, including updating their status.
+
+**File:** `frontend/src/hooks/useApplications.jsx`
+[View on GitHub](https://github.com/santrupt29/ai-resume-screener/blob/main/frontend/src/hooks/useApplications.jsx)
+
+```javascript
+// src/hooks/useApplications.js
+import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query';
+import { 
+  getApplications, 
+  submitApplication, 
+  updateApplicationStatus,
+  checkApplicationStatus
+} from '../lib/api';
+
+export function useApplications(jobId) {
+  return useQuery({
+    queryKey: ['applications', jobId],
+    queryFn: () => getApplications(jobId),
+    enabled: !!jobId,
+    retry: 1, 
+    select: (response) => {
+      return response?.data || [];
+    },
+  });
+}
+
+export function useSubmitApplication() {
+  const queryClient = useQueryClient();
+  
+  return useMutation({
+    mutationFn: submitApplication,
+    onSuccess: () => {
+      // Invalidate relevant queries if needed
+      queryClient.invalidateQueries({ queryKey: ['applications'] });
+    },
+    onError: (error) => {
+      console.error("Failed to submit application:", error);
+      // You could show a toast notification here
+    },
+  });
+}
+
+export function useUpdateApplicationStatus() {
+  const queryClient = useQueryClient();
+  
+  return useMutation({
+    mutationFn: ({ applicationId, status }) => updateApplicationStatus(applicationId, status),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ['applications'] });
+    },
+    onError: (error) => {
+      console.error("Failed to update application status:", error);
+    },
+  });
+}
+
+export function useCheckApplicationStatus() {
+  return useMutation({
+    mutationFn: ({ applicationId, email }) => checkApplicationStatus(applicationId, email),
+    onError: (error) => {
+      console.error("Failed to check application status:", error);
+    },
+  });
+}
+```
+
+**Explanation:**
+
+*   This file provides React hooks for interacting with the application data:
+    *   `useApplications`: Fetches a list of applications for a given job ID. It utilizes `useQuery` from `@tanstack/react-query` to manage the fetching and caching of data.
+    *   `useSubmitApplication`: Handles the submission of a new application. Uses `useMutation` to handle the asynchronous operation. Upon success, it invalidates the `applications` query to refetch the data.
+    *   `useUpdateApplicationStatus`: Updates the status of an application. Uses `useMutation`.  On success, it invalidates the `applications` query.
+    *   `useCheckApplicationStatus`: Allows to check the status of an application.
+
+## Data Flow and Management Overview
+
+The application's data flow involves the following steps:
+
+1.  **Frontend Request:** The frontend, likely in a component responsible for displaying or managing applications, initiates a request. This could be to list all applications for a job, to submit a new application, or to update the status of an existing application.
+2.  **API Interaction:** The frontend uses utility functions (defined in `frontend/src/lib/api.js`, not explicitly included in the provided code, but essential for the data flow) to interact with the backend API.
+3.  **Backend Processing:** The backend receives the request and, based on the request type (e.g., updating application status), executes the appropriate controller function (e.g., `updateApplicationStatus`).
+4.  **Database Interaction:** The controller uses the Supabase client to interact with the database (e.g., updating the status in the `candidate_submissions` table).
+5.  **Response:** The backend sends a response back to the frontend, indicating the success or failure of the operation.  The frontend then updates its UI accordingly.
+
+
+
+
+
+```mermaid
+graph LR
+    A["Frontend (React)"] -->|"Request: Get Applications, Submit Application, Update Status"| B(Backend (Node.js/Express))
+    B -->|"Uses Supabase Client"| C[Supabase Database]
+    C -->|"Data: Candidate Submissions, Status"| B
+    B -->|"Response: Success/Failure"| A
+    style A fill:#f9f,stroke:#333,stroke-width:2px
+    style B fill:#ccf,stroke:#333,stroke-width:2px
+    style C fill:#ccf,stroke:#333,stroke-width:2px
+```
+
+
+
+## Key Integration Points
+
+*   **Environment Variables:** Securely store sensitive information such as Supabase keys using environment variables. This is crucial to avoid hardcoding secrets and to enable environment-specific configurations.
+*   **React Query for Data Management:** Utilizing React Query in the frontend streamlines data fetching, caching, and mutation, providing a smooth user experience.
+*   **API Design:** The backend API endpoints should be designed to support the required operations, such as getting, creating, and updating application data. Robust error handling is essential.
+*   **Database Schema:** The database schema (e.g., the `candidate_submissions` table) should be designed to efficiently store the required data, including the status of each application. Consider indexes for performance optimization.
+*   **Authentication and Authorization:** While not explicitly shown in the provided code, in a production environment, proper authentication and authorization mechanisms are crucial to protect sensitive data and prevent unauthorized access. Supabase offers built-in authentication features.
+
+By integrating Supabase and structuring the application with clear data flow and efficient code, the `ai-resume-screener` application effectively manages its data to provide a seamless user experience. The combination of frontend hooks, a well-defined backend API, and a robust database ensures the application's ability to screen resumes and manage candidate applications effectively.
+```

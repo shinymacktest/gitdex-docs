@@ -1,0 +1,261 @@
+---
+title: "AI Resume Screening Logic"
+description: "Explains the core functionalities of the AI-powered resume screening."
+sidebar_position: 4
+---
+
+# AI Resume Screening Logic
+
+This section details the core functionalities of the AI-powered resume screening system implemented in the `ai-resume-screener` project. The system leverages AI to analyze resumes, compare them against job descriptions, and provide a comprehensive evaluation of candidate suitability. The primary files involved in this process are: `backend/controllers/processResume.js`, `backend/utils/extractTextPdf2jsonWithOcr.js`, `backend/utils/ocrSpaceAPI.js`, and `backend/controllers/analyzeMatches.js`.
+
+## Core Functionality
+
+The AI resume screening process can be broken down into several key steps:
+
+1.  **Resume Text Extraction**: Extracting the text content from the uploaded resume file.
+2.  **Embedding Generation**: Creating numerical embeddings of both the extracted resume text and the job description.
+3.  **Similarity Calculation**: Calculating the cosine similarity between the resume and job description embeddings.
+4.  **AI-Powered Analysis**: Utilizing a Large Language Model (LLM) to perform an in-depth analysis of the resume, including strengths, weaknesses, and interview suggestions.
+5.  **Result Storage**: Storing the analysis results in a Supabase database.
+
+## Text Extraction and Processing
+
+The system supports extracting text from various resume file formats. The `processResume.js` controller handles this task. It supports PDF, DOCX, and DOC formats.
+
+### File Handling and Text Extraction in `processResume.js`
+
+The `processResume` function in `processResume.js` orchestrates the resume processing workflow. It downloads the resume from Supabase storage, extracts the text, generates an embedding, and updates the database with the processed information.
+
+```javascript
+// backend/controllers/processResume.js
+import { supabase } from '../config/supabase.js';
+import mammoth from 'mammoth';
+import { extractTextFromPdfBuffer } from "../utils/extractTextPdf2jsonWithOcr.js";
+
+export async function processResume(req, res) {
+  // ... (Other code)
+
+  const fileName = resume.file_name.toLowerCase();
+
+  if (fileName.endsWith('.pdf')) {
+    try {
+      // PDF Parsing with pdf2json and OCR fallback
+      // ...
+    } catch (err) {
+      console.error("Unexpected PDF parsing failure:", err);
+      throw new Error("Could not extract text from the resume.");
+    }
+
+  } else if (fileName.endsWith('.docx')) {
+    const result = await mammoth.extractRawText({ buffer: fileBuffer });
+    extractedText = result.value;
+  } else if (fileName.endsWith('.doc')) {
+    extractedText = fileBuffer.toString('utf-8');
+  } else {
+    // Unsupported file type handling
+  }
+
+  // ... (Embedding Generation and Database Update)
+}
+```
+[View on GitHub](https://github.com/santrupt29/ai-resume-screener/blob/main/backend/controllers/processResume.js)
+
+### PDF Text Extraction using OCR
+
+For PDF files, the system uses a combination of `pdf2json` for direct text extraction and OCR (Optical Character Recognition) as a fallback mechanism. The `extractTextFromPdfBuffer` function in `backend/utils/extractTextPdf2jsonWithOcr.js` handles this.
+
+```javascript
+// backend/utils/extractTextPdf2jsonWithOcr.js
+import PDFParser from "pdf2json";
+
+export async function extractTextFromPdfBuffer(fileBuffer) {
+  try {
+    const pdfParser = new PDFParser();
+    // Attempt pdf2json parsing
+    // ...
+    if (rawText && rawText.trim()) {
+      return rawText;
+    } else {
+      console.warn("⚠️ extractTextFromPdfBuffer: pdf2json returned empty text. Falling back to OCR.");
+    }
+  } catch (err) {
+    console.warn("⚠️ pdf2json failed:", err.message || err);
+  }
+
+  // OCR Fallback - Implementation using pdftoppm and Tesseract
+  // ...
+}
+```
+[View on GitHub](https://github.com/santrupt29/ai-resume-screener/blob/main/backend/utils/extractTextPdf2jsonWithOcr.js)
+
+If `pdf2json` fails to extract the text (e.g., due to the PDF being image-based), the system falls back to OCR using `pdftoppm` to convert PDF pages to PNG images and `Tesseract.js` for text recognition.
+
+## Embedding Generation
+
+Once the text is extracted from the resume, an embedding is generated using the Google Gemini API, specifically using the `text-embedding-004` model. Embeddings are numerical representations of text that capture semantic meaning, allowing for similarity comparisons.
+
+### Generating Embeddings in `processResume.js`
+
+The `generateEmbedding` function (not shown in the provided snippet but crucial to the process) is responsible for calling the Gemini API to create the embedding. It takes the extracted text as input and returns the embedding vector.
+
+```javascript
+// backend/controllers/processResume.js (Conceptual Snippet)
+import { GoogleGenAI } from "@google/genai";
+
+async function generateEmbedding(text) {
+  try {
+    // API Call to Google Gemini model to create the embeddings
+  } catch (error) {
+    // Error handling
+  }
+}
+```
+[View on GitHub](https://github.com/santrupt29/ai-resume-screener/blob/main/backend/controllers/processResume.js) -  See the full file to view the embedding generation.
+
+## Analysis and Matching
+
+The `analyzeMatches` function in `backend/controllers/analyzeMatches.js` is central to the resume screening process. It fetches the resume and job description, calculates the similarity score, and uses the Gemini API to perform an AI-driven analysis.
+
+### Similarity Calculation in `analyzeMatches.js`
+
+The cosine similarity is calculated between the resume and job description embeddings to determine how well a candidate's skills and experience match the job requirements.
+
+```javascript
+// backend/controllers/analyzeMatches.js
+function cosineSimilarity(vecA, vecB) {
+  // ... (Cosine similarity calculation)
+}
+```
+[View on GitHub](https://github.com/santrupt29/ai-resume-screener/blob/main/backend/controllers/analyzeMatches.js)
+
+### AI-Powered Analysis in `analyzeMatches.js`
+
+The `analyzeResumeWithAI` function makes a call to the Gemini API, providing the resume text and job description as input. The model is prompted to generate a JSON response containing an overall match score, strengths, weaknesses, and suggested interview questions.
+
+```javascript
+// backend/controllers/analyzeMatches.js
+async function analyzeResumeWithAI(resumeText, jobDescription) {
+  try {
+    const prompt = `
+    Analyze the following resume against the job description and provide:
+    1. An overall match score from 0-100
+    2. A list of strengths (what makes the candidate a good fit)
+    3. A list of weaknesses (what the candidate is missing)
+    4. Suggestions for interview questions
+    
+    Resume:
+    ${resumeText}
+    
+    Job Description:
+    ${jobDescription}
+    
+    Please respond with JSON in the following format:
+    {
+      "score": 85,
+      "strengths": ["Strong experience in relevant technologies", "Leadership experience", etc.],
+      "weaknesses": ["Limited experience with X", "Missing certification Y", etc.],
+      "suggestions": ["Ask about experience with Z", "Discuss leadership style", etc.]
+    }
+      Give the complete response without any text formatting.
+    `;
+    // API Call to Gemini to analyze the resume with AI and return the JSON response
+  } catch (error) {
+    // Error handling
+  }
+}
+```
+[View on GitHub](https://github.com/santrupt29/ai-resume-screener/blob/main/backend/controllers/analyzeMatches.js)
+
+## Database Interaction
+
+The results of the analysis, including the similarity score and the AI-generated insights, are stored in a Supabase database. This enables tracking of resume matches and candidate evaluation over time.
+
+### Storing Results in `analyzeMatches.js`
+
+The `analyzeMatches` function stores the results in the `results` table of the Supabase database. It first checks if a result already exists for the resume and job combination; if so, it updates the existing record; otherwise, it inserts a new one.
+
+```javascript
+// backend/controllers/analyzeMatches.js
+async function analyzeMatches(req, res) {
+  // ... (Other code)
+
+  const { data: existingResult } = await supabase
+    .from('results')
+    .select('id')
+    .eq('job_posting_id', jobId)
+    .eq('resume_id', resumeId)
+    .single();
+
+  if (existingResult) {
+    // Update existing result
+  } else {
+    // Insert new result
+  }
+}
+```
+[View on GitHub](https://github.com/santrupt29/ai-resume-screener/blob/main/backend/controllers/analyzeMatches.js)
+
+## Error Handling and Resilience
+
+The system incorporates error handling throughout the process. It includes retry mechanisms for API calls and robust error handling to ensure that any failures are handled gracefully.
+
+## Key Integration Points
+
+*   **Asynchronous Processing:** The `processResume` function is designed to handle the core logic of extracting text, generating embeddings, and storing it in the database.
+*   **Background Analysis:**  The `analyzeMatchesAgainstJob` function enables the background analysis of a resume against a job posting once the resume is successfully processed. This functionality is crucial for the efficient execution of the resume screening process.
+*   **Modular Design:** The separation of concerns between different functions like text extraction, embedding generation, similarity calculation, and AI analysis improves the maintainability and readability of the code.
+
+## Mermaid Diagrams
+
+Here's a flowchart illustrating the resume screening process:
+
+
+
+
+
+```mermaid
+flowchart LR
+    A["Upload Resume"] --> B{File Type Check};
+    B -- PDF --> C{Extract Text (pdf2json)};
+    B -- DOCX, DOC --> D{Extract Text (mammoth, etc.)};
+    C -- Success --> E{Generate Embedding};
+    C -- Fail --> F{OCR Fallback};
+    F --> E;
+    D --> E;
+    E --> G{Store Extracted Text and Embedding};
+    G --> H{Process Job Description};
+    H --> I{Calculate Similarity};
+    I --> J{AI Analysis (Gemini)};
+    J --> K{Store Analysis Results in DB};
+    K --> L["Analysis Complete"];
+    F -- Fail --> L;
+    subgraph OCR
+        C -- Fail --> F
+    end
+```
+
+
+
+This diagram presents the core data flow within `processResume.js` when combined with other functionalities like `analyzeMatches`:
+
+
+
+
+
+```mermaid
+graph TD
+    A["User Uploads Resume"] --> B{Resume Uploaded to Supabase Storage};
+    B --> C{Trigger `processResume` Function};
+    C --> D{Download Resume from Storage};
+    D --> E{Extract Text};
+    E --> F{Generate Embedding};
+    F --> G{Update Resume Data in DB (Extracted Text, Embedding)};
+    G --> H{If job_posting_id exists};
+    H -- Yes --> I{Trigger `analyzeMatches`};
+    H -- No --> J["Resume Processed - Ready for Matching"];
+    I --> K{Fetch Job Posting Data};
+    K --> L{Calculate Similarity & AI Analysis};
+    L --> M{Store Analysis Results in DB};
+    M --> N["Analysis Complete"];
+```
+

@@ -1,0 +1,253 @@
+---
+title: "Deployment and Configuration"
+description: "Provides information about deployment strategies and configuration specifics."
+sidebar_position: 6
+---
+
+# Deployment and Configuration
+
+This section details the deployment strategies and configuration specifics for the AI Resume Screener project. It covers both frontend and backend configurations, including environment setup, build processes, and service interactions.
+
+## Backend Configuration (`backend/server.js`)
+
+The backend is built with Node.js and Express, utilizing Supabase for data storage, and Multer for handling file uploads. Configuration is managed through environment variables loaded via `dotenv`.
+
+```javascript
+// backend/server.js
+import { config } from 'dotenv';
+config();
+import { supabase } from './config/supabase.js';
+import express from 'express';
+import cors from 'cors';
+import multer from 'multer';
+import checkApplicationStatus from './controllers/checkApplications.js';
+import {processResume} from './controllers/processResume.js';
+import submitApplication from './controllers/submitApplications.js';
+console.log('checkApplicationStatus handler imported:', checkApplicationStatus);
+import analysisResults from './controllers/analysisResults.js';
+import getApplications from './controllers/getApplications.js';
+import updateApplicationStatus from './controllers/updateApplicationStatus.js';
+import {updateJobPosting, createJobPosting} from './controllers/createJobPosting.js';
+
+const app = express();
+const port = process.env.PORT || 3000;
+
+const corsOptions = {
+  origin: [process.env.PUBLIC_URL, 'https://hirelyzehq.vercel.app'],
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  credentials: true,
+};
+
+app.use(cors(corsOptions));
+app.use(express.json());
+app.use(express.urlencoded({ extended: true }));
+
+const upload = multer({ storage: multer.memoryStorage() });
+
+app.get('/api/analyze-results/:jobId', analysisResults);
+app.post('/api/check-application-status', checkApplicationStatus);
+app.post('/api/create-job-posting', createJobPosting);
+app.post('/api/process-resume', processResume);
+app.post('/api/submit-application', upload.single('resume'), submitApplication); // Handles file upload via multer
+app.get("/api/job-postings/:userId", async (req, res) => {
+  try {
+    const { userId } = req.params;
+
+    const { data, error } = await supabase
+      .from("job_postings")
+      .select("*")
+      .eq("user_id", userId)
+      .order("created_at", { ascending: false });
+
+    if (error) {
+      console.error("Error fetching job postings:", error);
+      return res.status(500).json({ error: "Failed to fetch job postings" });
+    }
+
+    return res.status(200).json(data);
+  } catch (err) {
+    console.error("Unexpected error:", err);
+    return res.status(500).json({ error: "Unexpected error occurred" });
+  }
+});
+app.get("/api/applications/:jobId", getApplications);
+app.post("/api/update-application-status/:id", updateApplicationStatus);
+app.get("/api/job-posting/:jobId", async (req, res) => {
+  try {
+    const { jobId } = req.params;
+
+    const { data, error } = await supabase
+      .from("job_postings")
+      .select("*")
+      .eq("id", jobId)
+      .single();
+
+    if (error) {
+      console.error("Error fetching job posting:", error);
+      return res.status(500).json({ error: "Failed to fetch job posting" });
+    }
+
+    return res.status(200).json(data);
+  } catch (err) {
+    console.error("Unexpected error:", err);
+    return res.status(500).json({ error: "Unexpected error occurred" });
+  }
+});
+app.post("/api/job-posting/:jobId", updateJobPosting)
+
+app.use((err, req, res, next) => {
+  console.error(err.stack);
+  res.status(500).json({ error: 'An unexpected error occurred' });
+});
+
+app.listen(port, () => {
+  console.log(`Server running on port ${port}`);
+});
+```
+
+[View on GitHub](https://github.com/santrupt29/ai-resume-screener/blob/main/backend/server.js)
+
+Key features:
+
+*   **Environment Variables:** Loads configuration from `.env` files using `dotenv`. This is crucial for managing sensitive information and adapting the application to different environments.
+*   **CORS Configuration:** Sets up Cross-Origin Resource Sharing (CORS) to allow requests from the frontend, ensuring secure communication between the frontend and backend.
+*   **File Upload:** Uses `multer` for handling resume uploads, storing them in memory.
+*   **API Endpoints:** Defines various API endpoints for interacting with the application, including:
+    *   `/api/process-resume`: Processes resumes.
+    *   `/api/submit-application`: Submits applications with resume uploads.
+    *   `/api/analyze-results/:jobId`: Retrieves analysis results.
+    *   `/api/job-postings/:userId`: Retrieves job postings.
+
+## Frontend Configuration (`frontend/vite.config.js`)
+
+The frontend leverages Vite for its build process, providing a fast development server and optimized production builds.
+
+```javascript
+// frontend/vite.config.js
+import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
+
+export default defineConfig({
+  plugins: [react()],
+  server: {
+    proxy: {
+      '/api': {
+        target: 'https://localhost:3000',
+        changeOrigin: true,
+        secure: false,
+        rewrite: (path) => path.replace(/^\/api/, '/api'),
+      }
+    }
+  },
+  resolve: {
+    alias: {
+      '@': '/src',
+    },
+  },
+})
+```
+
+[View on GitHub](https://github.com/santrupt29/ai-resume-screener/blob/main/frontend/vite.config.js)
+
+Key elements:
+
+*   **Proxy Configuration:** The `proxy` configuration in `vite.config.js` is essential for development. It redirects API requests from the frontend (running on `localhost:5173` or similar) to the backend (typically `localhost:3000`). This simplifies development by avoiding CORS issues and streamlining the development workflow.
+*   **React Plugin:**  Integrates the `@vitejs/plugin-react` plugin for React-specific transformations and optimizations.
+*   **Alias Configuration:**  Uses path aliases to improve code readability and maintainability.
+
+## Frontend Styling (`frontend/tailwind.config.js`)
+
+The project uses Tailwind CSS for styling, offering a utility-first approach to quickly build user interfaces.
+
+```javascript
+// tailwind.config.js
+/** @type {import('tailwindcss').Config} */
+export default {
+  content: [
+    "./index.html",
+    "./src/**/*.{js,ts,jsx,tsx}",
+  ],
+  theme: {
+    extend: {
+      colors: {
+        primary: {
+          50: '#eff6ff',
+          100: '#dbeafe',
+          200: '#bfdbfe',
+          300: '#93c5fd',
+          400: '#60a5fa',
+          500: '#3b82f6',
+          600: '#2563eb',
+          700: '#1d4ed8',
+          800: '#1e40af',
+          900: '#1e3a8a',
+        },
+      },
+    },
+  },
+  plugins: [],
+}
+```
+
+[View on GitHub](https://github.com/santrupt29/ai-resume-screener/blob/main/frontend/tailwind.config.js)
+
+Key aspects:
+
+*   **Content Configuration:** Specifies the paths where Tailwind should scan for CSS class names. This ensures that Tailwind generates the necessary styles for all components and pages.
+*   **Theme Customization:** Customizes the default Tailwind theme by extending the `colors` configuration. This allows for defining a custom color palette that matches the project's design.
+
+## Deployment on Vercel (`frontend/vercel.json`)
+
+Vercel is used for deploying the frontend. The `vercel.json` file configures how Vercel serves the application.
+
+```json
+// frontend/vercel.json
+{
+    "rewrites": [
+      {
+        "source": "/(.*)",
+        "destination": "/index.html"
+      }
+    ]
+  }
+```
+
+[View on GitHub](https://github.com/santrupt29/ai-resume-screener/blob/main/frontend/vercel.json)
+
+*   **Rewrites:** This configuration rewrites all incoming requests to `/index.html`. This is crucial for single-page applications (SPAs) like this React application, allowing Vercel to handle client-side routing correctly.  When a user navigates to a route like `/about`, the server serves `index.html`, and React's client-side router handles the rest.
+
+## Deployment Workflow
+
+The application can be deployed using the following general steps:
+
+1.  **Backend Deployment:** Deploy the backend Node.js application. You might use a service like Vercel, Heroku, or AWS Elastic Beanstalk. Ensure you set up environment variables (Supabase keys, port, etc.) correctly on the deployment platform.
+2.  **Frontend Deployment:** Deploy the frontend using Vercel.  Vercel automatically detects the project's structure (using `vite.config.js` and other configuration files) and builds and deploys the frontend. Ensure that the `PUBLIC_URL` environment variable is correctly configured to match the frontend deployment's URL.
+3.  **Database Setup:** Configure Supabase.  This involves setting up tables, security rules, and any required indexes.
+
+
+
+
+
+```mermaid
+graph LR
+    A["User"] --> B{Frontend (React)};
+    B --> C((Vercel Deployment));
+    B -- API Requests --> D{Backend (Node.js/Express)};
+    D --> E((Supabase Database));
+    C --> F["Deployed Frontend URL"];
+    D --> G((Cloud Provider));
+    G -- "Environment Variables" --> D
+```
+
+
+
+## Key Integration Points
+
+*   **Frontend-Backend Communication:**  The frontend makes API calls to the backend to perform actions such as submitting resumes, retrieving analysis results, and managing job postings. The `vite.config.js` file's proxy setting simplifies local development.
+*   **Database Interactions:** The backend interacts with Supabase for data storage and retrieval. This includes storing job postings, application data, and resume analysis results.  Ensure secure access and proper data modeling in Supabase.
+*   **Environment Variables:**  Use environment variables extensively for configurations such as API keys, database connection strings, and backend port numbers. This keeps sensitive information secure and makes it easy to deploy the application to different environments.
+*   **CORS Configuration:** Configure CORS in the backend (server.js) to allow requests from the frontend origin.  This is critical for cross-origin communication between the frontend and backend.
+*   **Vercel Configuration:** Use `vercel.json` to handle rewrites for client-side routing. This ensures that the application functions correctly after deployment on Vercel.
+
+By following these configuration and deployment strategies, you can successfully deploy and manage the AI Resume Screener application.

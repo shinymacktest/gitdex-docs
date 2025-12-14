@@ -1,0 +1,234 @@
+---
+title: "State Management (Redux)"
+description: "Explanation of the Redux architecture for managing application state."
+sidebar_position: 5
+---
+# State Management (Redux)
+
+This document outlines the state management architecture of TaskBuddy, which utilizes Redux for handling application-wide state. Redux provides a predictable and centralized way to manage the data that your application needs to render.
+
+## Redux Architecture Overview
+
+TaskBuddy employs the standard Redux pattern, consisting of three main parts:
+
+*   **Actions**: Plain JavaScript objects that describe what happened. They are the only way to get data into the Redux store.
+*   **Reducers**: Pure functions that take the previous state and an action, and return the next state. They specify how the state tree is transformed by actions.
+*   **Store**: A single object that holds the entire state tree of your application. It allows access to the state via `getState()`, and updates to the state via `dispatch(action)`.
+
+This structured approach ensures that state changes are explicit and traceable, making debugging and maintaining the application much easier.
+
+### Key Components
+
+#### Actions (`src/redux/actions/taskActions.jsx`)
+
+Actions are dispatched to signal an intent to change the state. In TaskBuddy, task-related actions define various operations that can be performed on the task list.
+
+```javascript
+// src/redux/actions/taskActions.jsx
+export const ADD_TASK = 'ADD_TASK';
+export const TOGGLE_TASK = 'TOGGLE_TASK';
+export const REMOVE_TASK = 'REMOVE_TASK';
+export const UPDATE_TASK = 'UPDATE_TASK';
+export const REORDER_TASKS = 'REORDER_TASKS';
+
+export const addTask = (task) => ({
+  type: ADD_TASK,
+  payload: {
+    id: Date.now(),
+    completed: false,
+    ...task,
+  },
+});
+
+export const toggleTask = (id) => ({
+  type: TOGGLE_TASK,
+  payload: id,
+});
+
+export const removeTask = (id) => ({
+  type: REMOVE_TASK,
+  payload: id,
+});
+
+export const updateTask = (id, updates) => ({
+  type: UPDATE_TASK,
+  payload: { id, updates },
+});
+
+export const reorderTasks = (dragId, hoverId) => (dispatch, getState) => {
+  const { tasks } = getState();
+  const dragIndex = tasks.findIndex(t => t.id === dragId);
+  const hoverIndex = tasks.findIndex(t => t.id === hoverId);
+
+  if (dragIndex === -1 || hoverIndex === -1) return;
+
+  const newTasks = [...tasks];
+  const [draggedTask] = newTasks.splice(dragIndex, 1);
+  newTasks.splice(hoverIndex, 0, draggedTask);
+
+  newTasks.forEach((task, index) => {
+    task.order = index;
+  });
+
+  dispatch({
+    type: 'REORDER_TASKS',
+    payload: newTasks,
+  });
+};
+```
+
+*   `ADD_TASK`: Used to add a new task to the list. It generates a unique `id` and initializes `completed` to `false`.
+*   `TOGGLE_TASK`: Flips the `completed` status of a specific task based on its `id`.
+*   `REMOVE_TASK`: Deletes a task from the state using its `id`.
+*   `UPDATE_TASK`: Allows modification of existing task properties (e.g., title, due date) identified by its `id`.
+*   `REORDER_TASKS`: Handles the logic for reordering tasks, typically in a drag-and-drop interface. This action is a thunk, allowing it to access the current state (`getState()`) and dispatch other actions (`dispatch()`). It updates the `order` property of each task to reflect its new position.
+
+[View on GitHub](https://github.com/meekhumor/TaskBuddy/blob/main/src/redux/actions/taskActions.jsx)
+
+#### Reducers (`src/redux/reducers/index.jsx`, `src/redux/reducers/taskReducer.jsx`)
+
+Reducers are responsible for updating the state in response to actions. TaskBuddy uses a `rootReducer` that combines multiple smaller reducers.
+
+```javascript
+// src/redux/reducers/index.jsx
+import { combineReducers } from 'redux';
+import taskReducer from './taskReducer';
+import categoryReducer from './categoryReducer';
+import filterReducer from './filterReducer';
+
+const rootReducer = combineReducers({
+  tasks: taskReducer,
+  categories: categoryReducer,
+  filter: filterReducer,
+});
+
+export default rootReducer;
+```
+
+The `rootReducer` orchestrates the state by combining:
+*   `taskReducer`: Manages the state of the tasks.
+*   `categoryReducer`: Manages the state of task categories.
+*   `filterReducer`: Manages the state related to task filtering.
+
+The `taskReducer` specifically handles the logic for modifying the `tasks` slice of the state.
+
+```javascript
+// src/redux/reducers/taskReducer.jsx
+import { ADD_TASK, TOGGLE_TASK, REMOVE_TASK, UPDATE_TASK, REORDER_TASKS } from '../actions/taskActions';
+
+// mock data
+const initialState = [
+  { id: 1, title: 'Submit the assignments', category: 'work', completed: false, priority: 'medium', dueDate: '2025-03-10', order: 0 },
+  { id: 2, title: 'Go for shopping', category: 'personal', completed: false, priority: 'low', dueDate: '2025-03-17', order: 1 },
+];
+
+const taskReducer = (state = initialState, action) => {
+  switch (action.type) {
+    case ADD_TASK:
+      return [...state, { ...action.payload, order: state.length }];
+    case TOGGLE_TASK:
+      return state.map(task =>
+        task.id === action.payload ? { ...task, completed: !task.completed } : task
+      );
+    case REMOVE_TASK:
+      return state.filter(task => task.id !== action.payload);
+    case UPDATE_TASK:
+      return state.map(task =>
+        task.id === action.payload.id ? { ...task, ...action.payload.updates } : task
+      );
+    case REORDER_TASKS:
+      return action.payload;
+    default:
+      return state;
+  }
+};
+
+export default taskReducer;
+```
+
+*   **Initial State**: The reducer starts with some mock data for tasks, including `id`, `title`, `category`, `completed` status, `priority`, `dueDate`, and `order`.
+*   **`ADD_TASK`**: Appends a new task to the existing state array. The `order` is set based on the current length of the array.
+*   **`TOGGLE_TASK`**: Iterates through the state and updates the `completed` property for the task matching the `action.payload` (the task ID).
+*   **`REMOVE_TASK`**: Filters out the task with the matching `action.payload` (the task ID).
+*   **`UPDATE_TASK`**: Finds the task by `id` and merges the `updates` object into it.
+*   **`REORDER_TASKS`**: Replaces the entire state with the new ordered array provided in `action.payload`.
+
+[View on GitHub](https://github.com/meekhumor/TaskBuddy/blob/main/src/redux/reducers/taskReducer.jsx)
+[View on GitHub](https://github.com/meekhumor/TaskBuddy/blob/main/src/redux/reducers/index.jsx)
+
+### The Redux Store (`src/redux/store.js`)
+
+The Redux store is the central hub for the application's state. It is created using `createStore` and configured with the `rootReducer` and middleware.
+
+```javascript
+// src/redux/store.js
+import { createStore, applyMiddleware } from 'redux';
+import {thunk} from 'redux-thunk'; // Correct import syntax
+import rootReducer from './reducers';
+import { loadState, saveState, debounce } from '../components/common/LocalStorage';
+
+const persistedState = loadState();
+const store = createStore(rootReducer, persistedState, applyMiddleware(thunk));
+
+store.subscribe(debounce(() => {
+  saveState({
+    tasks: store.getState().tasks,
+    categories: store.getState().categories,
+  });
+}, 1000));
+
+export default store;
+```
+
+*   **`createStore`**: Initializes the Redux store.
+    *   `rootReducer`: The combined reducer function that dictates state changes.
+    *   `persistedState`: The initial state is loaded from local storage, allowing state to persist across browser sessions.
+    *   `applyMiddleware(thunk)`: The `redux-thunk` middleware is applied. This is crucial for enabling action creators to return functions (thunks), which can dispatch multiple actions or perform asynchronous operations, as seen in the `reorderTasks` action.
+*   **`store.subscribe`**: A listener is attached to the store. Every time the state changes, the `saveState` function is called (debounced for performance) to persist the current state (tasks and categories) to local storage. This ensures that user data is not lost when the application is closed and reopened.
+
+[View on GitHub](https://github.com/meekhumor/TaskBuddy/blob/main/src/redux/store.js)
+
+### State Flow and Persistence
+
+The application's state flows from actions to reducers, updating the store. When the state changes, connected React components re-render to reflect the new data. For enhanced user experience and data integrity, TaskBuddy incorporates local storage persistence.
+
+#### Data Flow Diagram
+
+This diagram illustrates the fundamental flow of data within the Redux architecture as implemented in TaskBuddy.
+
+
+
+
+
+```mermaid
+graph TD
+    A["User Interaction"] --> B(Dispatch Action);
+    B --> C{Redux Middleware <br> (e.g., Thunk)};
+    C --> D(Reducer);
+    D --> E{Update Store};
+    E --> F["Connected Components <br> (React)"];
+    F --> G["UI Rendering"];
+    E --> H{"Local Storage <br> (Persistence)"};
+    H --> I["Initial State Load"];
+    I --> E;
+```
+
+
+
+#### Local Storage Persistence
+
+TaskBuddy leverages local storage to save and load application state, ensuring that user data is preserved between sessions.
+
+*   **Loading State**: When the application starts, `loadState()` is called to retrieve any previously saved state from local storage. This state is then used as the initial state for the Redux store.
+*   **Saving State**: The `store.subscribe` mechanism, combined with a debounced `saveState()` function, ensures that the current state of tasks and categories is periodically saved to local storage. Debouncing is used to prevent excessive writes to local storage, especially during rapid state changes.
+
+This persistence mechanism significantly improves the user experience by providing continuity and preventing data loss.
+
+### Key Integration Points
+
+*   **React Components**: React components are connected to the Redux store using libraries like `react-redux`. They dispatch actions to trigger state changes and select state from the store to render UI elements.
+*   **Thunk Middleware**: Essential for handling asynchronous operations or dispatching multiple actions in response to a single event. The `reorderTasks` action is a prime example of a thunk in action, as it requires reading the current state before dispatching the final `REORDER_TASKS` action.
+*   **Local Storage**: Integrated into the store setup to provide a seamless persistence layer, making the application state durable.
+*   **Combined Reducers**: Using `combineReducers` promotes modularity and organization, making it easier to manage different parts of the application's state independently.
+
+By adhering to these Redux principles, TaskBuddy maintains a robust, scalable, and maintainable state management system.

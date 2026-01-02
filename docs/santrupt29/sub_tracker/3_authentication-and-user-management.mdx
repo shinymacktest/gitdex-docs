@@ -1,0 +1,281 @@
+---
+title: "Authentication and User Management"
+description: "Handles user registration, login, and profile management."
+sidebar_position: 3
+---
+# Authentication and User Management
+
+This section details the authentication and user management features of the sub_tracker application. It covers user registration, login, and basic profile retrieval, secured by JWT-based authentication.
+
+## User Registration (`/api/v1/auth/sign-up`)
+
+The system allows new users to register by providing their name, email, and password. The email address must be unique. Passwords are securely hashed using bcrypt before being stored. Upon successful registration, a JSON Web Token (JWT) is generated and returned, which is necessary for subsequent authenticated requests.
+
+**Request Body:**
+
+| Field    | Type   | Description                  | Required |
+| -------- | ------ | ---------------------------- | -------- |
+| `name`   | String | The user's full name.        | Yes      |
+| `email`  | String | The user's email address.    | Yes      |
+| `password` | String | The user's desired password. | Yes      |
+
+**Example Request:**
+
+```bash
+POST /api/v1/auth/sign-up
+Content-Type: application/json
+
+{
+  "name": "John Doe",
+  "email": "john.doe@example.com",
+  "password": "securepassword123"
+}
+```
+
+**Controller Logic:**
+
+```javascript
+export const signUp = async (req, res, next) => {
+    const session = await mongoose.startSession();
+    session.startTransaction();
+
+    try {
+        const {name, email, password} = req.body;
+
+        const userExists = await User.findOne({email});
+        if (userExists) {
+            const error = new Error('Uswe already exists');
+            error.statusCode = 409;
+            throw error;
+        }
+
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(password, salt);
+
+        const newUsers = await User.create([{name, email, password: hashedPassword}], {session: session});   
+
+        const token = jwt.sign({userId: newUsers[0]._id}, JWT_SECRET, {expiresIn: JWT_EXPIRES_IN});
+
+        await session.commitTransaction();
+        session.endSession();
+
+        res.status(201).json({
+            success: true,
+            message: 'User created successfully',
+            data: {
+                token,
+                user : newUsers[0],
+            }
+        })
+    } catch (error) {
+        await session.abortTransaction();
+        session.endSession();           
+        next(error);
+    }
+}
+```
+
+## User Login (`/api/v1/auth/sign-in`)
+
+Existing users can log in by providing their email and password. The system validates the credentials against the stored hashed password. Upon successful authentication, a JWT is issued for the user.
+
+**Request Body:**
+
+| Field    | Type   | Description         | Required |
+| -------- | ------ | ------------------- | -------- |
+| `email`  | String | The user's email.   | Yes      |
+| `password` | String | The user's password. | Yes      |
+
+**Example Request:**
+
+```bash
+POST /api/v1/auth/sign-in
+Content-Type: application/json
+
+{
+  "email": "john.doe@example.com",
+  "password": "securepassword123"
+}
+```
+
+**Controller Logic:**
+
+```javascript
+export const signIn = async (req, res, next) => {
+    try {
+        const {email, password} = req.body;
+
+        const user = await User.findOne({email});
+        if (!user) {
+            const error = new Error('User not found');
+            error.statusCode = 401;
+            throw error;
+        }
+
+        const isPasswordValid = await bcrypt.compare(password, user.password);
+        if (!isPasswordValid) {
+            const error = new Error('Invalid password');
+            error.statusCode = 401;
+            throw error;
+        }
+
+        const token = jwt.sign({userId: user._id}, JWT_SECRET, {expiresIn: JWT_EXPIRES_IN});
+
+        res.status(200).json({
+            success: true,
+            message: 'User signed in successfully',
+            data: {
+                token,
+                user,
+            }
+        });
+    } catch (error) {
+        next(error);
+    }
+}
+```
+
+## User Logout (`/api/v1/auth/sign-out`)
+
+This endpoint is intended for user logout. Currently, it's a placeholder and does not implement server-side session invalidation. In a production environment, this would typically involve mechanisms like token blacklisting.
+
+## Retrieving Users
+
+### Get All Users (`/api/v1/users`)
+
+This endpoint retrieves a list of all registered users. Access to this endpoint is not restricted by authentication in the current implementation.
+
+**Example Response:**
+
+```json
+{
+  "success": true,
+  "data": [
+    {
+      "_id": "60d5ec49f9a8d3456789abc",
+      "name": "John Doe",
+      "email": "john.doe@example.com",
+      "createdAt": "2023-10-27T10:00:00.000Z",
+      "updatedAt": "2023-10-27T10:00:00.000Z"
+    },
+    // ... more users
+  ]
+}
+```
+
+### Get Specific User (`/api/v1/users/:id`)
+
+This endpoint retrieves details for a specific user, identified by their unique ID. This route is protected and requires a valid JWT in the Authorization header. The user's password hash is excluded from the response.
+
+**Example Request:**
+
+```bash
+GET /api/v1/users/60d5ec49f9a8d3456789abc
+Authorization: Bearer YOUR_JWT_TOKEN
+```
+
+**Middleware:**
+
+```javascript
+const authorize = async (req, res, next) => {
+    try {
+        let token;
+        if (req.headers.authorization && req.headers.authorization.startsWith('Bearer')) {
+            token = req.headers.authorization.split(' ')[1];
+        }
+        if (!token) {
+            return res.status(401).json({
+                message: 'Unauthorized'
+            });
+        }
+
+        const decoded = jwt.verify(token, JWT_SECRET);
+
+        const user = await User.findById(decoded.userId);
+
+        if (!user) {                
+            return res.status(401).json({
+                message: 'Unauthorized'
+            });
+        }
+
+    req.user = user;
+
+    next();
+ } catch (error) {
+        res.status(401).json({
+            message: 'Unauthorized',
+            message: error.message
+        });
+    }
+}
+```
+
+## Authentication Flow
+
+The following diagram illustrates the typical flow for user authentication:
+
+
+
+
+
+```mermaid
+graph TD
+    A["User"] -->|Requests Sign-up/Sign-in| B("API Gateway");
+    B -->|Routes to Auth Controller| C{Auth Controller};
+    C -->|Validates Credentials/Creates User| D{Database (User Model)};
+    D -->|Returns User Data| C;
+    C -->|Generates JWT| E[JWT Service];
+    E -->|Returns Token| B;
+    B -->|Returns Response| A;
+    subgraph Authentication Process
+        C
+        D
+        E
+    end
+```
+
+
+
+## User Schema
+
+The `User` model defines the structure for user data in the database.
+
+```javascript
+import mongoose from "mongoose";
+
+const userSchema = new mongoose.Schema({
+    name: {
+        type: String,
+        required: [true, 'User Name is Required'],
+        trim:true,
+        minLength :2,
+        maxLength: 50,
+    },
+    email: {
+        type: String,
+        required: [true, 'User Email is Required'],
+        unique: true,
+        trim:true,
+        lowercase: true,
+        match: [/\S+@\S+\.\S+/, 'Please enter a valid email']
+    },
+    password: {
+        type: String,
+        required: [true, 'Please provide a password'],
+        minLength: 6,
+    },
+    
+}, { timestamps: true });
+
+const User = mongoose.model('User', userSchema);
+
+export default User;
+```
+
+## Key Takeaways
+
+*   User authentication relies on JWTs for securing API endpoints.
+*   Passwords are salted and hashed using bcrypt.
+*   Endpoints for registration and login are exposed under `/api/v1/auth`.
+*   User data retrieval is available under `/api/v1/users`, with authenticated access for specific user details.

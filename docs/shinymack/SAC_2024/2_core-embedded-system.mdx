@@ -1,0 +1,270 @@
+---
+title: "Core Embedded System"
+description: "Details the architecture and fundamental logic running on the embedded hardware."
+sidebar_position: 2
+---
+# Core Embedded System
+
+The core embedded system for the `shinymack/SAC_2024` project is responsible for the autonomous navigation of the robot, specifically for line following and obstacle detection. This section details the architecture, dependencies, and fundamental logic implemented on the embedded hardware using the ESP-IDF framework.
+
+The system leverages a combination of line sensors, an Infrared (IR) sensor, and PID control algorithms to achieve precise movement and react to environmental cues.
+
+## Component Dependencies
+
+The project's dependencies are managed via the ESP-IDF component manager manifest file, `idf_component.yml`. This file specifies the required ESP-IDF version and additional components, such as `mdns` for network service discovery, which can be useful for debugging or future extensions.
+
+```yaml
+dependencies:
+  espressif/mdns: "^1.0.7"
+  ## Required IDF version
+  idf:
+    version: ">=4.1.0"
+```
+
+The `idf` dependency ensures compatibility with the specified ESP-IDF version, while `espressif/mdns` provides mDNS (multicast DNS) capabilities.
+
+## Hardware Initialization and Task Management
+
+The embedded system's primary logic resides within the `line_follow_task`, which is created and managed by FreeRTOS. Before the line-following logic commences, essential hardware components are initialized.
+
+```c
+void line_follow_task(void* arg) {
+    motor_handle_t motor_a_0, motor_a_1;
+    ESP_ERROR_CHECK(enable_motor_driver(&motor_a_0, MOTOR_A_0));
+    ESP_ERROR_CHECK(enable_motor_driver(&motor_a_1, MOTOR_A_1));
+    adc_handle_t line_sensor;
+    ESP_ERROR_CHECK(enable_line_sensor(&line_sensor));
+    ESP_ERROR_CHECK(enable_bar_graph());
+
+    //ir sensor initialization
+    gpio_config_t io_conf = {
+        .pin_bit_mask = (1ULL << IR_SENSOR_PIN),
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_DISABLE,
+        .pull_down_en = GPIO_PULLDOWN_ENABLE,
+        .intr_type = GPIO_INTR_DISABLE
+    };
+    gpio_config(&io_conf);
+
+    #ifdef CONFIG_ENABLE_OLED
+        ESP_ERROR_CHECK(init_oled());
+        vTaskDelay(100);
+        lv_obj_clean(lv_scr_act());
+    #endif
+    // ... main loop ...
+}
+```
+
+This snippet shows the initialization of the motor drivers (`MOTOR_A_0`, `MOTOR_A_1`), the line sensor, and an optional bar graph display. Crucially, the IR sensor is configured as an input GPIO pin to detect obstacles. If `CONFIG_ENABLE_OLED` is defined, an OLED display is also initialized, likely for real-time debugging information.
+
+## Line Following Logic
+
+The core of the robot's navigation is the line-following algorithm, which continuously reads sensor data, calculates an error, applies PID control, and adjusts motor speeds.
+
+### Sensor Data Processing
+
+The five line sensors provide analog readings that are processed to determine the robot's position relative to the line. These raw readings are first bounded, then mapped to a standardized range (`bound_LSA_LOW` to `bound_LSA_HIGH`), and finally inverted to simplify the black/white distinction logic. A `BLACK_BOUNDARY` value helps classify readings as "black" or "white".
+
+### Error Calculation and Line State Detection
+
+The `calculate_error` function is central to determining the robot's deviation from the line. It uses a weighted sum of binary sensor readings (1 for black, 0 for white) to calculate a `pos` value, which directly contributes to the `error`.
+
+```c
+void calculate_error() {
+    all_black_flag = 1;
+    float weighted_sum = 0, sum = 0;
+    float pos = 0;
+    bool left_reading = line_sensor_readings.adc_reading[0] > BLACK_BOUNDARY;
+    bool right_reading = line_sensor_readings.adc_reading[4] > BLACK_BOUNDARY;
+
+    for (int i = 0; i < 5; i++) {
+        int k = line_sensor_readings.adc_reading[i] > BLACK_BOUNDARY ? 1 : 0;
+        weighted_sum += (float)(weights[i]) * k;
+        sum += k;
+
+        if (line_sensor_readings.adc_reading[i] > BLACK_BOUNDARY) {
+            all_black_flag = 0; // If any sensor sees black, it's not all black
+        }
+    }
+
+    // Determine turn flags based on outermost sensors
+    if (left_reading == 1 ) {
+        left_turn_flag = 1;
+        right_turn_flag = 0;
+    } else if (left_reading == 0 && right_reading == 1) {
+        left_turn_flag = 0;
+        right_turn_flag = 1;
+    } else {
+        left_turn_flag = right_turn_flag = 0;
+    }
+
+    // U-turn condition
+    if (all_black_flag == 1) {
+        u_turn_flag = 1;
+    } else {
+        u_turn_flag = 0;
+    }
+
+    if (sum != 0) {
+        pos = (weighted_sum - 1) / sum; // Calculate weighted position
+    }
+
+    // Special error handling for all-black state
+    if (all_black_flag == 1) {
+        error = prev_error > 0 ? 10 : -10; // Continue in last known direction
+    } else {
+        error = pos;
+    }
+}
+```
+
+This function also sets flags like `left_turn_flag`, `right_turn_flag`, and `u_turn_flag` based on the sensor readings, allowing the robot to execute specific maneuvers. The `all_black_flag` detects when all sensors are on a black surface, indicating a potential U-turn scenario.
+
+### PID Control for Motor Speeds
+
+The `calculate_correction` function implements a PID (Proportional-Integral-Derivative) control loop. It takes the current `error`, `prev_error`, and `cumulative_error` to calculate a `correction` value that is applied to the motor duty cycles.
+
+```c
+void calculate_correction() {
+    difference = error - prev_error;
+    cumulative_error += error;
+    cumulative_error = bound(cumulative_error, -30, 30); // Prevent integral wind-up
+
+    correction = read_pid_const().kp * error +
+                 read_pid_const().ki * cumulative_error +
+                 read_pid_const().kd * difference;
+    prev_error = error;
+}
+```
+
+The PID constants (`kp`, `ki`, `kd`) are read from a `tuning_http_server` component, allowing for real-time tuning of the PID parameters over Wi-Fi, which is crucial for optimizing performance.
+
+### Motor Control Logic
+
+Based on the calculated `correction` and various state flags, the motor duty cycles are adjusted. The `optimum_duty_cycle` serves as a base speed, modified by the `correction` to steer the robot. Different motor speed settings are applied for turns, U-turns, and straight line following.
+
+```c
+        left_duty_cycle = bound((optimum_duty_cycle + correction), lower_duty_cycle, higher_duty_cycle);
+        right_duty_cycle = bound((optimum_duty_cycle - correction), lower_duty_cycle, higher_duty_cycle);
+
+        if (left_turn_flag == 1) {
+            set_motor_speed(motor_a_0, MOTOR_BACKWARD, right_duty_cycle);
+            set_motor_speed(motor_a_1, MOTOR_FORWARD, right_duty_cycle);
+            // ... more turn logic ...
+        } else if (right_turn_flag == 1 && left_turn_flag == 0) {
+            // ... right turn logic ...
+        } else if(left_turn_flag == 1 && right_turn_flag == 1){
+            // ... special turn logic ...
+        } else if (u_turn_flag) {
+            // ... u-turn logic based on history ...
+        } else {
+            // PID controlled straight movement
+            set_motor_speed(motor_a_0, MOTOR_FORWARD, left_duty_cycle);
+            set_motor_speed(motor_a_1, MOTOR_FORWARD, right_duty_cycle);
+        }
+```
+
+The duty cycles are bounded between `lower_duty_cycle` and `higher_duty_cycle` to prevent extreme speeds. The `store_sensor_history` function and subsequent `calculate_average` are used to decide the direction of a U-turn when all sensors detect black, by checking the recent history of the outermost sensors.
+
+## Obstacle and End-of-Line Detection
+
+The robot is equipped with an IR sensor for obstacle detection and a logic for identifying the end of the line.
+
+### Obstacle Detection
+
+The IR sensor (`IR_SENSOR_PIN`) is continuously monitored. If an obstacle is detected (`ir_state == 0`), a specific maneuver (e.g., stopping or changing direction) can be triggered. In the current implementation, if both all-white and an obstacle are detected, the robot backs up and turns.
+
+```c
+        int ir_state = gpio_get_level(IR_SENSOR_PIN);
+        if (ir_state == 0) {
+            ESP_LOGI("debug", "Obstacle detected!");
+            // Handle obstacle detection logic here
+        } else {
+            ESP_LOGI("debug", "No obstacle detected.");
+        }
+
+        // ...
+        if(all_white && ir_state == 0){
+            set_motor_speed(motor_a_0, MOTOR_FORWARD, higher_duty_cycle);
+            set_motor_speed(motor_a_1, MOTOR_BACKWARD, higher_duty_cycle);
+            vTaskDelay(1100 / portTICK_PERIOD_MS);
+        }
+```
+
+### End-of-Line Detection
+
+The system also incorporates logic to detect the end of the line. If all five line sensors consistently read "white" for a predefined number of iterations (`REQUIRED_WHITE_COUNT`), the robot stops.
+
+```c
+        int all_white = 1;
+        if(line_sensor_readings.adc_reading[0] > BLACK_BOUNDARY && 
+        line_sensor_readings.adc_reading[1] > BLACK_BOUNDARY && 
+        line_sensor_readings.adc_reading[2] > BLACK_BOUNDARY && 
+        line_sensor_readings.adc_reading[3]> BLACK_BOUNDARY  && 
+        line_sensor_readings.adc_reading[4] > BLACK_BOUNDARY ){
+            all_white = 1;
+        }
+        else{
+            all_white = 0;
+        }
+
+        // Update consecutive white count
+        if (all_white) {
+            cwhitecount++;
+        } else {
+            cwhitecount = 0;
+        }
+
+        // Stop the bot if consecutive white count exceeds threshold
+        if (cwhitecount >= REQUIRED_WHITE_COUNT) {
+            set_motor_speed(motor_a_0, MOTOR_STOP, 0);
+            set_motor_speed(motor_a_1, MOTOR_STOP, 0);
+            ESP_LOGI("debug", "End of line detected. Stopping bot.");
+            break; // Exit the line following task loop
+        }
+```
+
+This mechanism ensures the robot gracefully terminates its operation upon reaching the end of its designated path.
+
+## System Flow
+
+
+
+
+
+```mermaid
+graph TD
+    A["`app_main()`"] --> B["`start_tuning_http_server()`"];
+    A --> C["`xTaskCreate(line_follow_task)`"];
+    C --> D["Initialize Hardware (Motors, Sensors, IR)"];
+    D --> E{"Loop (`while(true)`)"};
+    E --> F{"IR Sensor (Obstacle Detected?)"};
+    F --> G["Read Line Sensor"];
+    G --> H["Process Line Sensor Readings (Map, Bound, Invert)"];
+    H --> I["Check All White Status"];
+    I --> J{"All White & IR Obstacle?"};
+    J -->|"Yes"| K["Execute Back-Up Maneuver"];
+    K --> E;
+    J -->|"No"| L{"Consecutive White Count >= Threshold?"};
+    L -->|"Yes"| M["Stop Motors & Exit Task"];
+    L -->|"No"| N["`calculate_error()` (Flags: U-turn, Left/Right Turn)"];
+    N --> O["`calculate_correction()` (PID)"];
+    O --> P["`store_sensor_history()`"];
+    P --> Q["Calculate Motor Duty Cycles"];
+    Q --> R{"Decision Logic (Turn Flags, U-Turn, PID)"};
+    R --> S["Set Motor Speeds"];
+    S --> T["`vTaskDelay()`"];
+    T --> E;
+```
+
+
+
+## Key Takeaways
+
+The Core Embedded System for the `shinymack/SAC_2024` robot provides a robust framework for autonomous line following. Key features include:
+
+*   **ESP-IDF Foundation**: Leverages the ESP-IDF for efficient task management and hardware abstraction.
+*   **PID Control**: Implements a PID algorithm for precise line following, with external tuning capabilities via an HTTP server.
+*   **Multi-Sensor Integration**: Combines line sensors for path detection and an IR sensor for obstacle avoidance.
+*   **Advanced Navigation Logic**: Includes specific maneuvers for turns, U-turns, and handling all-black or all-white line conditions.
+*   **Reliable Termination**: Features an end-of-line detection mechanism to safely stop the robot.

@@ -1,0 +1,174 @@
+---
+title: "Network and Communication"
+description: "Covers the network setup and communication protocols used for remote interaction and control."
+sidebar_position: 3
+---
+# Network and Communication
+
+The `shinymack/SAC_2024` project relies on robust network connectivity and communication protocols to enable remote interaction, control, and parameter tuning for the line-following robot. This section details the Wi-Fi setup and the implementation of an HTTP server for real-time PID constant adjustment.
+
+## Wi-Fi Connectivity
+
+The robot uses an ESP32 microcontroller, leveraging its built-in Wi-Fi capabilities to connect to a local area network. The `wifi_handler` component is responsible for establishing and maintaining this connection.
+
+The connection process is event-driven, utilizing FreeRTOS event groups to signal connection status. Upon startup, the `connect_to_wifi` function initializes the NVS flash (for storing Wi-Fi credentials), network interfaces, and starts the Wi-Fi in Station (STA) mode.
+
+```c
+void connect_to_wifi()
+{
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) 
+    {
+      ESP_ERROR_CHECK(nvs_flash_erase());
+      ret = nvs_flash_init();
+    }
+    ESP_ERROR_CHECK(ret);
+
+    ESP_LOGI(TAG, "ESP_WIFI_MODE_STA");
+    wifi_init_sta();
+}
+```
+
+The `wifi_init_sta` function configures the Wi-Fi module with the SSID and password defined in `sdkconfig.h` (e.g., `CONFIG_WIFI_SSID`, `CONFIG_WIFI_PASSWORD`). It registers an event handler (`event_handler`) to manage Wi-Fi events such as connection attempts, disconnections, and IP address acquisition. The system attempts to reconnect a configurable number of times (`MAXIMUM_RETRY`) before signaling a connection failure.
+
+```c
+static void event_handler(void* arg, esp_event_base_t event_base, int32_t event_id, void* event_data)
+{
+    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) 
+    {
+        esp_wifi_connect();
+    } 
+    else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) 
+    {
+        if (s_retry_num < MAXIMUM_RETRY) {
+            esp_wifi_connect();
+            s_retry_num++;
+            ESP_LOGI(TAG, "retry to connect to the AP");
+        } else {
+            xEventGroupSetBits(s_wifi_event_group, WIFI_FAIL_BIT);
+        }
+        ESP_LOGI(TAG,"connect to the AP fail");
+    } 
+    else if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) 
+    {
+        ip_event_got_ip_t* event = (ip_event_got_ip_t*) event_data;
+        ESP_LOGI(TAG, "got ip:" IPSTR, IP2STR(&event->ip_info.ip));
+        s_retry_num = 0;
+        xEventGroupSetBits(s_wifi_event_group, WIFI_CONNECTED_BIT);
+    }
+}
+```
+
+## Remote Tuning HTTP Server
+
+Once connected to Wi-Fi, the ESP32 launches an HTTP server to enable real-time tuning of PID constants and to serve a web-based user interface. This is handled by the `tuning_http_server` component.
+
+The server initializes several network services:
+*   **mDNS (multicast DNS)**: Allows the device to be discovered on the local network by its hostname (e.g., `esp32.local`) without needing to know its IP address.
+*   **NetBIOS over TCP/IP (NBNS)**: Provides a similar hostname resolution service for Windows clients.
+*   **SPIFFS (SPI Flash File System)**: Used to serve static web assets (HTML, CSS, JavaScript) for the tuning interface.
+
+```c
+static void initialise_mdns(void)
+{
+    mdns_init();
+    mdns_hostname_set(MDNS_HOST_NAME);
+    mdns_instance_name_set(MDNS_INSTANCE);
+
+    mdns_txt_item_t serviceTxtData[] = {
+        {"board", "esp32"},
+        {"path", "/"}
+    };
+
+    ESP_ERROR_CHECK(mdns_service_add("ESP32-WebServer", "_http", "_tcp", 80, serviceTxtData,
+                                     sizeof(serviceTxtData) / sizeof(serviceTxtData[0])));
+}
+```
+
+The HTTP server registers two primary URI handlers:
+1.  **GET `/*`**: The `rest_common_get_handler` serves static files from the SPIFFS partition. This enables a web browser to load the tuning interface by accessing the device's IP or mDNS hostname.
+2.  **POST `/api/v1/pid`**: The `tuning_pid_post_handler` is an API endpoint for receiving updated PID constants (Kp, Ki, Kd) from the client. It parses the incoming JSON payload and updates the internal PID state.
+
+```c
+static esp_err_t tuning_pid_post_handler(httpd_req_t *req)
+{
+    // ... (buffer and receive logic) ...
+
+    cJSON *root = cJSON_Parse(buf);
+    if (root == NULL) { /* handle error */ }
+    
+    if (!cJSON_HasObjectItem(root, "kp") || !cJSON_HasObjectItem(root, "ki") || !cJSON_HasObjectItem(root, "kd")) { /* handle error */ }
+    
+    pid_constants.kp = (float)cJSON_GetObjectItem(root, "kp")->valuedouble;
+    pid_constants.ki = (float)cJSON_GetObjectItem(root, "ki")->valuedouble;
+    pid_constants.kd = (float)cJSON_GetObjectItem(root, "kd")->valuedouble;
+
+    cJSON_Delete(root);
+    httpd_resp_sendstr(req, "Post control value successfully");
+
+    pid_constants.val_changed = true; // Signal that PID constants have been updated
+    return ESP_OK;
+}
+```
+
+The `start_tuning_http_server_private` function sets up the HTTP server instance and registers these handlers.
+
+```c
+static esp_err_t start_tuning_http_server_private()
+{
+    httpd_handle_t server = NULL;
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    config.uri_match_fn = httpd_uri_match_wildcard; // Enable wildcard matching for GET requests
+
+    ESP_LOGI(TAG, "Starting HTTP Server");
+    if (httpd_start(&server, &config) != ESP_OK) { /* handle error */ }
+    
+    httpd_uri_t tuning_pid_post_uri = {
+        .uri = "/api/v1/pid",
+        .method = HTTP_POST,
+        .handler = tuning_pid_post_handler,
+        .user_ctx = NULL
+    };
+    if (httpd_register_uri_handler(server, &tuning_pid_post_uri) != ESP_OK) { /* handle error */ }
+
+    httpd_uri_t common_get_uri = {
+        .uri = "/*", // Wildcard URI to serve all static files
+        .method = HTTP_GET,
+        .handler = rest_common_get_handler,
+        .user_ctx = NULL
+    };
+    if(httpd_register_uri_handler(server, &common_get_uri) != ESP_OK) { /* handle error */ }
+
+    return ESP_OK;
+}
+```
+
+## Network and Communication Flow
+
+
+
+
+
+```mermaid
+graph TD
+    A["System Start"] --> B[Initialize NVS Flash];
+    B --> C[Initialize Network Interface];
+    C --> D[Create Default Event Loop];
+    D --> E[Start Wi-Fi Station Mode];
+    E --> F{Wi-Fi Connected?};
+    F -- No (Fail) --> G[Log & Handle Failure];
+    F -- Yes (Got IP) --> H[Initialize mDNS];
+    H --> I[Initialize NetBIOS];
+    I --> J[Initialize SPIFFS];
+    J --> K[Start HTTP Server];
+    K -- Registers GET "/*" --> L[Serve Static Web UI];
+    K -- Registers POST "/api/v1/pid" --> M[Receive PID Tuning Data];
+    M --> N[Update PID Constants];
+    N --> O[Signal PID Values Changed];
+```
+
+
+
+## Key Takeaways
+
+The network and communication infrastructure is designed for robust connectivity and remote interaction. The Wi-Fi handler ensures a reliable connection to the local network, with retry mechanisms in place. The HTTP server then provides a user-friendly interface for observing and adjusting critical control parameters (PID constants) over Wi-Fi, making the robot highly tunable and accessible. Services like mDNS and NetBIOS enhance discoverability on the network, simplifying the connection process for users.

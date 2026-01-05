@@ -1,0 +1,189 @@
+---
+title: "Line Following Logic"
+description: "Describes the core C implementation of the line following algorithm and control logic."
+sidebar_position: 22
+---
+# Line Following Logic
+
+This section details the core C implementation of the line following algorithm for the shinymack/SAC_2024 robot, as found in `line_following/main/line_following.c`. It describes how the robot interprets line sensor data, calculates deviations, applies PID control, and executes steering maneuvers to stay on a track, including handling turns, U-turns, obstacles, and end-of-line conditions.
+
+## Initialization and Sensor Processing
+
+The `line_follow_task` initializes the motor drivers and the analog line sensor array. The line sensor readings, initially raw ADC values, are processed through several steps:
+1.  **Bounding**: Values are constrained between `WHITE_MARGIN` (0) and `BLACK_MARGIN` (4095).
+2.  **Mapping**: Raw ADC values are mapped to a smaller, normalized range (0-1000) for consistent processing.
+3.  **Inversion**: Readings are inverted (`1000 - reading`) so that a higher value corresponds to black, simplifying thresholding logic.
+
+The `BLACK_BOUNDARY` constant (950) is crucial for distinguishing between black and white segments of the line. Any sensor reading above this threshold is considered to be "seeing" the black line.
+
+```c
+void line_follow_task(void* arg) {
+    motor_handle_t motor_a_0, motor_a_1;
+    ESP_ERROR_CHECK(enable_motor_driver(&motor_a_0, MOTOR_A_0));
+    ESP_ERROR_CHECK(enable_motor_driver(&motor_a_1, MOTOR_A_1));
+    adc_handle_t line_sensor;
+    ESP_ERROR_CHECK(enable_line_sensor(&line_sensor));
+
+    // ... other initializations ...
+
+    while (true) {
+        line_sensor_readings = read_line_sensor(line_sensor);
+        
+        for (int i = 0; i < 5; i++) {
+            line_sensor_readings.adc_reading[i] = bound(line_sensor_readings.adc_reading[i], WHITE_MARGIN, BLACK_MARGIN);
+            line_sensor_readings.adc_reading[i] = map(line_sensor_readings.adc_reading[i], WHITE_MARGIN, BLACK_MARGIN, bound_LSA_LOW, bound_LSA_HIGH);
+            line_sensor_readings.adc_reading[i] = 1000 - line_sensor_readings.adc_reading[i];
+        }
+        // ... rest of the loop ...
+    }
+}
+```
+
+## Error Calculation
+
+The `calculate_error` function determines the robot's deviation from the center of the line. It uses a weighted average of the five line sensors. The `weights` array `{-5, -3, 1, 3, 5}` assigns a negative weight to sensors on the left, a positive weight to sensors on the right, and a small positive weight to the center sensor, assuming the center sensor is ideally `0` in a perfectly centered scenario.
+
+The function calculates a `weighted_sum` and `sum` of active (black) sensors. The `pos` variable indicates the robot's position relative to the line (negative for left deviation, positive for right deviation). Special flags (`left_turn_flag`, `right_turn_flag`, `u_turn_flag`, `all_black_flag`) are set based on specific sensor patterns to handle more complex scenarios like sharp turns or detecting junctions. If all sensors detect black, `u_turn_flag` is set. If no sensors detect black, the error defaults to the `prev_error`'s sign, indicating the direction the line was last seen.
+
+```c
+void calculate_error() {
+    all_black_flag = 1;
+    float weighted_sum = 0, sum = 0;
+    float pos = 0;
+    bool left_reading = line_sensor_readings.adc_reading[0] > BLACK_BOUNDARY;
+    bool right_reading = line_sensor_readings.adc_reading[4] > BLACK_BOUNDARY;
+
+    for (int i = 0; i < 5; i++) {
+        int k = line_sensor_readings.adc_reading[i] > BLACK_BOUNDARY ? 1 : 0;
+        weighted_sum += (float)(weights[i]) * k;
+        sum += k;
+
+        if (line_sensor_readings.adc_reading[i] > BLACK_BOUNDARY) {
+            all_black_flag = 0;
+        }
+    }
+
+    if (left_reading == 1 ) {
+        left_turn_flag = 1;
+        right_turn_flag = 0;
+    } else if (left_reading == 0 && right_reading == 1) {
+        left_turn_flag = 0;
+        right_turn_flag = 1;
+    } else {
+        left_turn_flag = right_turn_flag = 0;
+    }
+
+    if (all_black_flag == 1) {
+        u_turn_flag = 1;
+    } else {
+        u_turn_flag = 0;
+    }
+
+    if (sum != 0) {
+        pos = (weighted_sum - 1) / sum;
+    }
+
+    if (all_black_flag == 1) {
+        error = prev_error > 0 ? 10 : -10; // If all black, continue in previous direction
+    } else {
+        error = pos;
+    }
+}
+```
+
+## PID Control Logic
+
+The Proportional-Integral-Derivative (PID) controller uses the calculated `error` to generate a `correction` value, which then adjusts the motor speeds.
+*   **Proportional (P)**: `read_pid_const().kp * error` reacts to the current error.
+*   **Integral (I)**: `read_pid_const().ki * cumulative_error` addresses steady-state errors over time. The `cumulative_error` is bounded to prevent wind-up.
+*   **Derivative (D)**: `read_pid_const().kd * difference` anticipates future errors by reacting to the rate of change of the error.
+
+```c
+void calculate_correction() {
+    difference = error - prev_error;
+    cumulative_error += error;
+    cumulative_error = bound(cumulative_error, -30, 30); // Prevent integral wind-up
+
+    correction = read_pid_const().kp * error +
+                 read_pid_const().ki * cumulative_error +
+                 read_pid_const().kd * difference;
+    prev_error = error;
+}
+```
+
+## Steering and Motor Control
+
+The `correction` value is applied to the `optimum_duty_cycle` to determine `left_duty_cycle` and `right_duty_cycle`. A positive correction makes the robot turn left (by decreasing left motor speed and increasing right motor speed), and a negative correction makes it turn right.
+
+The robot's steering behavior is dynamically adjusted based on the flags set during error calculation:
+*   **`left_turn_flag`**: Indicates the line is mostly on the left, prompting a strong left turn.
+*   **`right_turn_flag`**: Indicates the line is mostly on the right. If the center sensor also sees black, it performs a straight turn, otherwise a sharper right turn.
+*   **`u_turn_flag`**: Triggered when all sensors detect black. The robot decides whether to turn left or right based on the history of sensor 0 and 4, calculated by `calculate_average`. This helps it complete U-turns or navigate complex junctions.
+*   **Standard PID**: If no special turn flags are active, the robot follows the line using the calculated PID correction.
+*   **Obstacle Detection**: An IR sensor (`IR_SENSOR_PIN`) is monitored. If an obstacle is detected (`ir_state == 0`) and all line sensors see white, the robot attempts a specific maneuver (e.g., pivot turn) before resuming line following.
+*   **End of Line**: The robot stops if a continuous `REQUIRED_WHITE_COUNT` of all-white readings are detected, indicating the end of the track.
+
+```c
+    // Inside line_follow_task loop
+    left_duty_cycle = bound((optimum_duty_cycle + correction), lower_duty_cycle, higher_duty_cycle);
+    right_duty_cycle = bound((optimum_duty_cycle - correction), lower_duty_cycle, higher_duty_cycle);
+
+    if (left_turn_flag == 1) {
+        set_motor_speed(motor_a_0, MOTOR_BACKWARD, right_duty_cycle); // Pivot left
+        set_motor_speed(motor_a_1, MOTOR_FORWARD, right_duty_cycle);
+        // ...
+    } else if (right_turn_flag == 1 && left_turn_flag == 0) {
+        if (line_sensor_readings.adc_reading[2] > BLACK_BOUNDARY) {
+            set_motor_speed(motor_a_0, MOTOR_FORWARD, left_duty_cycle); // PID forward
+            set_motor_speed(motor_a_1, MOTOR_FORWARD, right_duty_cycle);
+        } else {
+            set_motor_speed(motor_a_0, MOTOR_FORWARD, left_duty_cycle); // Pivot right
+            set_motor_speed(motor_a_1, MOTOR_BACKWARD, left_duty_cycle);
+        }
+    }
+    // ... U-turn and other conditions ...
+    else {
+        set_motor_speed(motor_a_0, MOTOR_FORWARD, left_duty_cycle); // Standard PID control
+        set_motor_speed(motor_a_1, MOTOR_FORWARD, right_duty_cycle);
+    }
+```
+
+## Line Following Task Flow
+
+
+
+
+
+```mermaid
+graph TD
+    A[Start line_follow_task] --> B{Initialize Motors, Sensors};
+    B --> C[Loop: forever];
+    C --> D{Read IR Sensor};
+    D --> E{Read Line Sensors & Calibrate};
+    E --> F{Check for All White Line};
+    F -- If All White --> G{Increment cwhitecount};
+    F -- Else --> H{Reset cwhitecount};
+    G --> I{cwhitecount >= REQUIRED_WHITE_COUNT?};
+    I -- Yes --> J[Stop Motors & Break Loop];
+    I -- No --> K{Obstacle detected & All White?};
+    K -- Yes --> L[Execute Obstacle Turn];
+    K -- No --> M{Calculate Error (pos, all_black_flag, turn_flags)};
+    M --> N{Calculate Correction (PID)};
+    N --> O{Store Sensor History};
+    O --> P{Calculate Avg. Sensor 0 & 4 History};
+    P --> Q{Determine Motor Duty Cycles (left_duty_cycle, right_duty_cycle)};
+    Q --> R{Apply Motor Speeds based on turn_flags / all_black_flag / history_avg};
+    R --> S[Delay (10ms)];
+    S --> C;
+```
+
+
+
+## Key Takeaways
+
+*   The line following logic employs a 5-sensor array with weighted error calculation.
+*   A PID controller (Proportional-Integral-Derivative) is used to generate precise steering corrections.
+*   Special flags (`left_turn_flag`, `right_turn_flag`, `u_turn_flag`) handle specific line patterns, providing robust navigation for junctions and sharp turns.
+*   Sensor history for the outermost sensors assists in determining the appropriate U-turn direction when `all_black_flag` is set.
+*   An IR sensor provides obstacle detection capabilities, triggering a specific avoidance maneuver.
+*   An "all white" detection mechanism, combined with a consecutive count, allows for reliable end-of-line detection to stop the robot.

@@ -1,0 +1,363 @@
+---
+title: "Content Presentation and Features"
+description: "How content like movies, TV shows, and anime is displayed and interacted with."
+sidebar_position: 7
+---
+# Content Presentation and Features
+
+This section details how movies, TV shows, and anime are presented to the user within the LandeMon application, focusing on the visual layout, interactive elements, and core functionalities for content discovery and playback.
+
+## Hero Section
+
+The Hero section serves as the primary landing point, showcasing a randomly selected show with prominent visuals and key information. It aims to immediately engage the user and provide quick access to content.
+
+The `Hero` component dynamically displays a background image of the selected show, along with its title, match percentage, release date, and overview. Actionable buttons for "Play" and "More Info" are provided. The "More Info" button triggers a modal to display detailed information about the show, updating the browser's history to reflect the current view.
+
+```tsx
+// src/components/hero.tsx
+'use client';
+import { Icons } from '@/components/icons';
+import { Button } from '@/components/ui/button';
+import { getIdFromSlug, getNameFromShow, getSlug } from '@/lib/utils';
+import MovieService from '@/services/MovieService';
+import { useModalStore } from '@/stores/modal';
+import { useSearchStore } from '@/stores/search';
+import { MediaType, type Show } from '@/types';
+import { type AxiosResponse } from 'axios';
+import Link from 'next/link';
+import React from 'react';
+import CustomImage from './custom-image';
+import { usePathname } from 'next/navigation';
+
+interface HeroProps {
+  randomShow: Show | null;
+}
+
+const Hero = ({ randomShow }: HeroProps) => {
+  // ... (rest of the component logic)
+  return (
+    <section aria-label="Hero" className="w-full">
+      {randomShow && (
+        <>
+          <div className="absolute inset-0 z-0 h-[100vw] w-full sm:h-[56.25vw]">
+            <CustomImage
+              src={`https://image.tmdb.org/t/p/original${
+                randomShow?.backdrop_path ?? randomShow?.poster_path ?? ''
+              }`}
+              alt={randomShow?.title ?? 'poster'}
+              className="-z-40 h-auto w-full object-cover"
+              sizes="(max-width: 768px) 50vw, (max-width: 1200px) 100vw, 33vw"
+              fill
+              priority
+            />
+            <div className="absolute bottom-0 left-0 right-0 top-0">
+              <div className="absolute bottom-[35%] left-[4%] top-0 z-10 flex w-[36%] flex-col justify-end space-y-2">
+                <h1 className="text-[3vw] font-bold">
+                  {randomShow?.title ?? randomShow?.name}
+                </h1>
+                <div className="flex space-x-2 text-[2vw] font-semibold md:text-[1.2vw]">
+                  <p className="text-green-600">
+                    {Math.round(randomShow?.vote_average * 10) ?? '-'}% Match
+                  </p>
+                  <p>{randomShow?.release_date ?? '-'}</p>
+                </div>
+                <p className="hidden text-[1.2vw] sm:line-clamp-3">
+                  {randomShow?.overview ?? '-'}
+                </p>
+                <div className="mt-[1.5vw] flex items-center space-x-2">
+                  <Link prefetch={false} href={handleHref()}>
+                    <Button
+                      aria-label="Play video"
+                      className="h-auto flex-shrink-0 gap-2 rounded-xl">
+                      <Icons.play className="fill-current" aria-hidden="true" />
+                      Play
+                    </Button>
+                  </Link>
+                  <Button
+                    aria-label="Open show's details modal"
+                    variant="outline"
+                    className="h-auto flex-shrink-0 gap-2 rounded-xl"
+                    onClick={() => {
+                      // ... modal logic
+                    }}>
+                    <Icons.info aria-hidden="true" />
+                    More Info
+                  </Button>
+                </div>
+              </div>
+            </div>
+            {/* ... gradients */}
+          </div>
+          <div className="relative inset-0 -z-50 mb-5 pb-[60%] sm:pb-[40%]"></div>
+        </>
+      )}
+    </section>
+  );
+};
+
+export default Hero;
+```
+
+## Content Carousels and Grids
+
+LandeMon utilizes carousels and grids to efficiently display collections of shows, enabling users to browse through various categories or search results.
+
+### Shows Carousel
+
+The `ShowsCarousel` component presents a horizontally scrollable list of `ShowCard` components, ideal for showcasing curated lists like "Trending Now" or "Top Rated." It includes navigation buttons to scroll left and right, offering a smooth browsing experience.
+
+```tsx
+// src/components/shows-carousel.tsx
+'use client';
+
+import { useModalStore } from '@/stores/modal';
+import { MediaType, type Show } from '@/types';
+import * as React from 'react';
+
+import { Icons } from '@/components/icons';
+import { Button } from '@/components/ui/button';
+import { cn, getNameFromShow, getSlug } from '@/lib/utils';
+import { usePathname } from 'next/navigation';
+import CustomImage from './custom-image';
+
+interface ShowsCarouselProps {
+  title: string;
+  shows: Show[];
+}
+
+const ShowsCarousel = ({ title, shows }: ShowsCarouselProps) => {
+  const pathname = usePathname();
+
+  const showsRef = React.useRef<HTMLDivElement>(null);
+  const [isScrollable, setIsScrollable] = React.useState(false);
+
+  // ... (scroll logic)
+
+  return (
+    <section aria-label="Carousel of shows" className="relative my-[3vw] p-0">
+      {shows.length !== 0 && (
+        <div className="space-y-1 sm:space-y-2.5">
+          <h2 className="m-0 px-[4%] text-lg font-semibold text-foreground/80 transition-colors hover:text-foreground sm:text-xl 2xl:px-[60px]">
+            {title ?? '-'}
+          </h2>
+          <div className="relative w-full items-center justify-center overflow-hidden">
+            <Button
+              aria-label="Scroll to left"
+              variant="ghost"
+              className={cn(
+                'absolute left-0 top-0 z-10 mr-2 hidden h-full w-[4%] items-center justify-center rounded-l-none bg-transparent py-0 text-transparent hover:bg-secondary/90 hover:text-foreground md:block 2xl:w-[60px]',
+                isScrollable ? 'md:block' : 'md:hidden',
+              )}
+              onClick={() => scrollToDirection('left')}>
+              <Icons.chevronLeft className="h-8 w-8" aria-hidden="true" />
+            </Button>
+            <div
+              ref={showsRef}
+              className="no-scrollbar m-0 grid auto-cols-[calc(100%/3)] grid-flow-col overflow-x-auto overflow-y-hidden px-[4%] py-0 duration-500 ease-in-out sm:auto-cols-[25%] md:touch-pan-y lg:auto-cols-[20%] xl:auto-cols-[calc(100%/6)] 2xl:px-[60px]">
+              {shows.map((show) => (
+                <ShowCard key={show.id} show={show} pathname={pathname} />
+              ))}
+            </div>
+            <Button
+              aria-label="Scroll to right"
+              variant="ghost"
+              className="absolute right-0 top-0 z-10 m-0 ml-2 hidden h-full w-[4%] items-center justify-center rounded-r-none bg-transparent py-0 text-transparent hover:bg-secondary/70 hover:text-foreground md:block 2xl:w-[60px]"
+              onClick={() => scrollToDirection('right')}>
+              <Icons.chevronRight className="h-8 w-8" aria-hidden="true" />
+            </Button>
+          </div>
+        </div>
+      )}
+    </section>
+  );
+};
+
+// ... ShowCard component
+```
+
+The `ShowCard` component is a reusable element displaying an individual show's poster. Clicking on a `ShowCard` opens a modal with more details about the show and initiates playback if applicable.
+
+### Shows Grid
+
+The `ShowsGrid` component is used for displaying search results or other collections of shows in a responsive grid layout. This is particularly useful for the search results page, where multiple items need to be presented clearly.
+
+```tsx
+// src/components/shows-grid.tsx
+'use client';
+
+import { useModalStore } from '@/stores/modal';
+import type { Show } from '@/types';
+import ShowModal from './shows-modal';
+import { ShowCard } from './shows-carousel';
+import { usePathname } from 'next/navigation';
+import { useSearchStore } from '@/stores/search';
+import ShowsSkeleton from './shows-skeleton';
+import { cn } from '@/lib/utils';
+
+interface SearchedShowsProps {
+  shows: Show[];
+  query?: string;
+}
+
+const ShowsGrid = ({ shows, query }: SearchedShowsProps) => {
+  const pathname = usePathname();
+  // modal store
+  const modalStore = useModalStore();
+  const searchStore = useSearchStore();
+
+  return (
+    <section aria-label="Grid of shows" className="container w-full max-w-none">
+      {modalStore.open && <ShowModal />}
+      <div className="main-view mt-4 min-h-[800px] pt-[5%]" id="main-view">
+        {query && searchStore.loading ? (
+          <ShowsSkeleton classname="pl-0" />
+        ) : query && !shows?.length ? (
+          <div className="text-center">
+            {/* ... No results message */}
+          </div>
+        ) : (
+          <div
+            className={cn(
+              'xxs:grid-cols-2 xxs:gap-x-1.5 xxs:gap-y-5 grid gap-y-3.5 xs:grid-cols-3 xs:gap-y-7 sm:grid-cols-3 sm:gap-y-10 md:grid-cols-4 md:gap-y-12 lg:gap-y-14 xl:grid-cols-6 xl:gap-y-16',
+              query && 'max-sm:grid-cols-3 max-[375px]:grid-cols-2',
+            )}>
+            {shows.map((show: Show) => (
+              <ShowCard key={show.id} show={show} pathname={pathname} />
+            ))}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+};
+
+export default ShowsGrid;
+```
+
+## Video Playback
+
+The `EmbedPlayer` component is responsible for rendering the video player, whether it's for movies, TV shows, or anime.
+
+The player dynamically loads content based on the `mediaType` and `movieId`. For anime, it fetches season and episode data to populate a sidebar, allowing users to select and switch between episodes. For other media types, it directly embeds the provided URL. A loading indicator is displayed until the video player is ready.
+
+```tsx
+// src/components/watch/embed-player.tsx
+'use client';
+
+import React, { useRef, useEffect, useCallback, useState } from 'react';
+import Loading from '../ui/loading';
+import Season from '../season';
+import { MediaType, IEpisode, type ISeason, type Show } from '@/types';
+import MovieService from '@/services/MovieService';
+import { type AxiosResponse } from 'axios';
+
+interface EmbedPlayerProps {
+  url: string;
+  movieId?: string;
+  mediaType?: MediaType;
+}
+
+export default function EmbedPlayer({
+  url,
+  movieId,
+  mediaType,
+}: EmbedPlayerProps) {
+  const iframeRef = useRef<HTMLIFrameElement>(null);
+  const loadingRef = useRef<HTMLDivElement>(null);
+  const [seasons, setSeasons] = useState<ISeason[] | null>(null);
+
+  const setIframeUrl = (newUrl: string) => {
+    if (!iframeRef.current) return;
+    iframeRef.current.src = newUrl;
+    iframeRef.current.style.opacity = '0';
+    loadingRef.current?.style.setProperty('display', 'flex');
+  };
+
+  const onIframeLoad = () => {
+    if (!iframeRef.current) return;
+    iframeRef.current.style.opacity = '1';
+    loadingRef.current?.style.setProperty('display', 'none');
+  };
+
+  const handleChangeEpisode = (episode: IEpisode) => {
+    const { show_id: id, episode_number: eps } = episode;
+    setIframeUrl(`https://vidsrc.cc/v2/embed/anime/tmdb${id}/${eps}/sub`);
+  };
+
+  const loadAnime = useCallback(async (id: string) => {
+    const numericId = Number(id.replace('t-', ''));
+
+    const res: AxiosResponse<Show> = await MovieService.findTvSeries(numericId);
+
+    if (!res.data?.seasons?.length) return;
+
+    const filteredSeasons = res.data.seasons.filter(
+      (season: ISeason) => season.season_number,
+    );
+
+    const promises = filteredSeasons.map(async (season: ISeason) => {
+      return MovieService.getSeasons(numericId, season.season_number);
+    });
+
+    const seasonWithEpisodes = await Promise.all(promises);
+    setSeasons(
+      seasonWithEpisodes.map((response: AxiosResponse<ISeason>) => response.data),
+    );
+
+    setIframeUrl(
+      `https://vidsrc.cc/v2/embed/anime/tmdb${numericId}/1/sub?autoPlay=false`,
+    );
+  }, []);
+
+  useEffect(() => {
+    const iframe = iframeRef.current;
+    if (!iframe) return;
+
+    iframe.addEventListener('load', onIframeLoad);
+    return () => iframe.removeEventListener('load', onIframeLoad);
+  }, []);
+
+  useEffect(() => {
+    if (mediaType === MediaType.ANIME && movieId) {
+      void loadAnime(movieId);
+      return;
+    }
+
+    // For non-anime, use original behavior
+    if (iframeRef.current) {
+      iframeRef.current.src = url;
+    }
+  }, [mediaType, movieId, url, loadAnime]);
+
+  return (
+    <div className="relative h-[100dvh] w-full bg-black">
+      {seasons && (
+        <Season seasons={seasons} onChangeEpisode={handleChangeEpisode} />
+      )}
+
+      <div
+        ref={loadingRef}
+        className="absolute inset-0 z-[1] flex items-center justify-center bg-black">
+        <Loading />
+      </div>
+
+      <iframe
+        ref={iframeRef}
+        className="h-full w-full border-none transition-opacity duration-300"
+        allowFullScreen
+        referrerPolicy="no-referrer-when-downgrade"
+        style={{ opacity: 0 }}
+      />
+    </div>
+  );
+}
+```
+
+## Key Takeaways
+
+*   **Hero Section**: Provides an immediate, engaging introduction to a featured show with prominent visuals and calls to action.
+*   **Carousels and Grids**: Offer flexible and scalable ways to present multiple content items, catering to browsing and discovery.
+*   **Interactive `ShowCard`**: Enables users to quickly view details and initiate playback of individual shows.
+*   **`EmbedPlayer`**: Handles video playback, with specialized logic for anime to manage seasons and episodes.
+*   **State Management**: Utilizes stores (`useModalStore`, `useSearchStore`) to manage UI states like modal visibility and search loading.
+*   **Navigation**: Leverages `next/navigation` for routing and `window.history` for seamless in-page navigation updates when opening modals.

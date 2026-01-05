@@ -1,0 +1,251 @@
+---
+title: "User & Room Management"
+description: "Describes the functionality for user registration, login, profile management, and displaying user-specific information."
+sidebar_position: 5
+---
+# User & Room Management
+
+This section of the documentation details the user experience related to authentication, profile management, and accessing user-specific data within the WhiteBoard application. It covers user registration, login, displaying personal information, and managing saved drawings. The application leverages Auth0 for robust authentication and authorization.
+
+## Authentication and Authorization
+
+The WhiteBoard application uses Auth0 to manage user authentication, providing secure login and registration flows. When a user first interacts with the application, they are prompted to log in or sign up.
+
+The `Header` component, typically found on the landing page, provides the entry points for authentication:
+
+```tsx
+import React from 'react';
+import { useAuth0 } from "@auth0/auth0-react";
+
+const Header = () => {
+  const { loginWithRedirect } = useAuth0();
+
+  return (
+    <div className="w-full h-18 bg-[#092635] flex flex-row justify-between items-center px-6 py-3">
+      <h1 className="text-3xl text-[#9EC8B9] font-bold">WhiteBoard</h1>
+      <div className="flex justify-between items-center" >
+        <button
+          className="w-24 mr-5 h-11 bg-[#1B4242] text-white font-medium rounded-md hover:bg-[#5C8374] transition duration-300"
+          onClick={() => loginWithRedirect()}>
+          Login
+        </button>
+        <button
+          className="w-24 h-11 mr-2 bg-[#1B4242] text-white font-medium rounded-md hover:bg-[#5C8374] transition duration-300"
+          onClick={() => loginWithRedirect()}>
+          SignUp
+        </button>
+      </div>
+    </div>
+  );
+};
+
+export default Header;
+```
+
+Upon successful authentication with Auth0, the user's session is established, and their profile information becomes accessible throughout the application via the `useAuth0` hook.
+
+## User Profile Display
+
+User-specific information, such as their name, email, and profile picture, is displayed prominently after authentication. The `UserInfo` component is responsible for rendering this data. It receives the `user` object from Auth0 as a prop.
+
+```tsx
+import React from 'react'
+
+const UserInfo = ({ user }) => {
+    return (
+        <div className="max-w-4xl mx-auto mt-10 bg-white rounded-2xl shadow-lg p-8">
+            <div className="flex flex-col md:flex-row items-center md:items-start gap-8">
+                {user.picture ? (
+                    <img
+                        src={user.picture}
+                        onError={(e) => { e.target.src = './assets/react.png'; }}
+                        alt="Profile"
+                        className="w-32 h-32 rounded-full border-4 border-blue-500 shadow-md object-cover"
+                    />
+                ) : (
+                    <div className="w-32 h-32 bg-gray-200 rounded-full animate-pulse" />
+                )}
+                <div className="text-center md:text-left">
+                    <h2 className="text-3xl font-bold text-gray-800">{user.name}</h2>
+                    <p className="text-gray-500">{user.email}</p>
+                    {user.nickname && (
+                        <p className="text-gray-400 text-sm mt-1">
+                            Username: <span className="font-medium">{user.nickname}</span>
+                        </p>
+                    )}
+                </div>
+            </div>
+        </div>
+    )
+}
+
+export default UserInfo
+```
+
+The `ProfilePage` component integrates `UserInfo` to present the authenticated user's details at the top of their profile view.
+
+## Profile Management and Saved Drawings
+
+The `ProfilePage` component serves as the central hub for user profile management. It displays the authenticated user's information and provides a list of all drawings they have saved. This component handles data fetching, loading states, and user interactions for managing drawings.
+
+Upon loading, the `ProfilePage` component verifies user authentication and fetches the saved drawings from the backend API.
+
+```tsx
+import React, { useEffect, useState } from 'react';
+import { useAuth0 } from '@auth0/auth0-react';
+import axios from '/src/lib/axios.js';
+// ... other imports
+
+const ProfilePage = () => {
+    const { user, isLoading, isAuthenticated, logout } = useAuth0();
+    const [savedD, setsavedD] = useState([]);
+    const [isDataLoading, setIsDataLoading] = useState(false); // New state for data loading
+    // ... navigate hook
+
+    useEffect(() => {
+        const getDrawings = async () => {
+            setIsDataLoading(true); // Start loading
+            try {
+                const res = await axios.get(`/profile/${user?.sub}/savedDrawings`);
+                setsavedD(res.data.drawings);
+            } catch (error) {
+                console.error(error);
+            } finally {
+                setIsDataLoading(false); // Stop loading
+            }
+        };
+
+        if (user) getDrawings();
+    }, [user]);
+
+    // ... loading and authentication checks
+
+    // ... handleDelete function and return statement
+};
+```
+
+Each saved drawing is displayed in a table format, allowing users to view, download, or delete their creations.
+
+```tsx
+// ... inside ProfilePage component, within the return statement
+<tbody>
+    {savedD.map((drawing, idx) => (
+        <tr
+            key={idx}
+            className={`border-b border-[#7C3AED]/30 hover:bg-[#7C3AED]/20 transition-all duration-200 animate-slide-in`}
+            style={{ animationDelay: `${idx * 0.1}s` }}
+        >
+            <td className="py-3 px-4 text-[#2D3748]">{drawing.title}</td>
+            <td className="py-3 px-4 text-[#2D3748]">{drawing.roomid}</td>
+            <td className="py-3 px-4 text-[#2D3748]">
+                {new Date(drawing.date).toLocaleDateString()}
+            </td>
+            <td className="py-3 px-4">
+                <div className="flex gap-4 text-lg">
+                    {/* View */}
+                    <a
+                        href={drawing.url}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-[#14B8A6] hover:text-[#FBBF24] transform hover:scale-105 transition-all duration-200"
+                        title="View Drawing"
+                    >
+                        <FiEye />
+                    </a>
+                    {/* Download */}
+                    <a
+                        href={`${drawing.url.replace("/upload/", "/upload/fl_attachment:" + drawing.title + "/")}`}
+                        download
+                        className="text-[#14B8A6] hover:text-[#FBBF24] transform hover:scale-105 transition-all duration-200"
+                        title="Download Drawing"
+                    >
+                        <FiDownload />
+                    </a>
+                    {/* Delete */}
+                    <button
+                        onClick={() => handleDelete(drawing)}
+                        className="text-red-500 hover:text-red-600 transform hover:scale-105 transition-all duration-200"
+                        title="Delete Drawing"
+                    >
+                        <FiTrash2 />
+                    </button>
+                </div>
+            </td>
+        </tr>
+    ))}
+    {/* ... empty state for no drawings */}
+</tbody>
+```
+
+The `handleDelete` function is responsible for sending a request to the backend to remove a specific drawing from the user's saved collection.
+
+```tsx
+// ... inside ProfilePage component
+const handleDelete = async (drawing) => {
+    const confirm = window.confirm(`Are you sure you want to delete "${drawing.title}"?`);
+    if (!confirm) return;
+
+    try {
+        await axios.delete(`/profile/${user.sub}/deleteDrawing`, {
+            params: { roomid: drawing.roomid, id: drawing._id }
+        });
+        setsavedD(prev => prev.filter(d => !(d._id === drawing._id && d.roomid === drawing.roomid)));
+    } catch (err) {
+        console.error("Error deleting drawing:", err);
+    }
+};
+```
+
+## User Logout
+
+Users can securely log out of their session from the `ProfilePage` using the `logout` function provided by Auth0.
+
+```tsx
+// ... inside ProfilePage component, within the header section
+<button
+  className="p-2 rounded-full bg-[#14B8A6] text-white hover:bg-[#FBBF24] transition transform hover:scale-105 border border-white"
+  onClick={() =>
+    logout({
+      logoutParams: {
+        returnTo: window.location.origin, // Corrected location
+      },
+    })
+  }
+  title="Logout"
+  aria-label="Log out"
+>
+  <svg className="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24" xmlns="http://www.w3.org/2000/svg">
+    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1"></path>
+  </svg>
+</button>
+```
+
+## User Flow Diagram: Authentication and Profile Access
+
+
+
+
+
+```mermaid
+graph TD
+    A["User"] -->|1. Clicks Login/Signup| B["Header Component"]
+    B -->|2. `loginWithRedirect()`| C["Auth0 (IDP)"]
+    C -->|3. Authenticates & Redirects| D["Application Callback"]
+    D -->|4. Authenticated User State| E["ProfilePage Component"]
+    E -->|5. Fetches User Info & Drawings| F["Backend API"]
+    F -->|6. Returns Data| E
+    E -->|7. Displays Profile & Drawings| A
+    E -->|8. Clicks Logout| C
+    C -->|9. Logs out & Redirects| B["Landing Page/Header"]
+```
+
+
+
+## Key Takeaways
+
+*   **Auth0 Integration**: The application uses Auth0 for seamless and secure user authentication and authorization.
+*   **Profile Display**: The `UserInfo` component is a reusable module for displaying user profile details.
+*   **Profile Management**: The `ProfilePage` provides a comprehensive interface for users to view their details and manage their saved drawings.
+*   **Data Persistence**: Saved drawings are fetched from and managed through a backend API, ensuring persistence across sessions.
+*   **User Actions**: Users have clear actions (view, download, delete) for their saved drawings directly from their profile.
+*   **Logout Functionality**: A prominent logout option is available to securely end user sessions.

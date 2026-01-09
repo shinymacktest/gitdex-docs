@@ -1,0 +1,254 @@
+---
+title: "Authentication and Authorization"
+description: "Explains the mechanisms for user authentication and access control."
+sidebar_position: 21
+---
+# Authentication and Authorization
+
+This section details the authentication and authorization mechanisms implemented in the Chat App backend, ensuring secure user access and data protection.
+
+## User Authentication
+
+The application supports both traditional email/password-based authentication and OAuth 2.0 authentication via Google.
+
+### Email/Password Authentication
+
+Users can sign up and log in using their email address and a password. Passwords are securely hashed using `bcryptjs` before being stored in the database.
+
+**Signup Process:**
+The `signup` controller handles new user registrations. It validates input fields, checks for existing email or username conflicts, hashes the password, and generates a JWT upon successful creation.
+
+```javascript
+// backend/src/controllers/auth.controller.js
+export const signup = async (req, res) => {
+    const {username, email, password} = req.body;
+    try {
+        if(!username || !email || !password) {
+            return res.status(400).json({message: "Please fill in all fields."});
+        }
+        // ... (validation checks) ...
+
+        const salt = await bcrypt.genSalt(10);
+        const hashedPassword = await bcrypt.hash(password, salt);
+
+        const newUser = new User({
+            username,
+            email,
+            password: hashedPassword,
+            authProvider: 'email'
+        });
+        if(newUser){
+            generateToken(newUser._id, res); // Generate JWT
+            await newUser.save();
+            // ... (send response) ...
+        } else {
+            res.status(400).json({message: "Invalid user data."});
+        }
+    } catch (error) {
+        console.log("Error in signup controller", error.message)
+        res.status(500).json({message: "Something went wrong."});
+    }
+};
+```
+
+**Login Process:**
+The `login` controller verifies user credentials. It retrieves the user by email, compares the provided password with the stored hash using `bcrypt.compare`, and generates a JWT upon successful authentication.
+
+```javascript
+// backend/src/controllers/auth.controller.js
+export const login = async (req, res) => {
+    const {email, password} = req.body;
+    try {
+        const user = await User.findOne({email});
+        if(!user) {
+            return res.status(400).json({message: "Invalid credentials."});
+        }
+        const isPasswordCorrect = await bcrypt.compare(password, user.password);
+        if(!isPasswordCorrect) {
+            return res.status(400).json({message: "Invalid credentials."});
+        }
+        generateToken(user._id, res); // Generate JWT
+        // ... (send response) ...
+    } catch (error) {
+        console.log("Error in login controller", error.message);
+        res.status(500).json({message: "Something went wrong."});
+    }
+};
+```
+
+### Google OAuth 2.0 Authentication
+
+The application integrates with Google for a streamlined login experience.
+
+**Configuration:**
+The `passport-google-oauth20` strategy is configured to handle Google authentication requests. It requires Google Client ID, Client Secret, and a Callback URL, which are managed via environment variables.
+
+```javascript
+// backend/src/lib/passport.config.js
+import passport from 'passport';
+import { Strategy as GoogleStrategy } from 'passport-google-oauth20';
+// ...
+
+export const configurePassport = () => {
+    passport.use(new GoogleStrategy({
+        clientID: process.env.GOOGLE_CLIENT_ID,
+        clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+        callbackURL: process.env.GOOGLE_CALLBACK_URL,
+        scope: ['profile', 'email']
+    },
+    async (accessToken, refreshToken, profile, done) => {
+        try {
+            let user = await User.findOne({ googleId: profile.id });
+            if (user) {
+                return done(null, user);
+            } else {
+                // ... (logic to create new user) ...
+                const newUser = new User({
+                    googleId: profile.id,
+                    email: profile.emails && profile.emails[0] ? profile.emails[0].value : null,
+                    username: username,
+                    authProvider: 'google',
+                });
+                await newUser.save();
+                return done(null, newUser);
+            }
+        } catch (error) {
+            return done(error, null);
+        }
+    }));
+
+    // ... (serialization/deserialization) ...
+};
+```
+
+**Callback Handling:**
+After a user authenticates with Google, the `/google/callback` route is invoked. This route uses `passport.authenticate` to process the Google response. If successful, a JWT is generated, and the user is redirected to the frontend.
+
+```javascript
+// backend/src/routes/auth.route.js
+router.get(
+    '/google/callback',
+    passport.authenticate('google', {
+        failureRedirect: 'http://localhost:5173/login',
+        failureMessage: true
+    }),
+    googleAuthCallback
+);
+```
+
+## Authorization and Access Control
+
+Authorization is primarily managed through JSON Web Tokens (JWT) and middleware.
+
+### JWT Authentication
+
+Upon successful login (either email/password or Google), a JWT is generated and sent to the client, typically stored in an HTTP-only cookie. This token contains the user's ID.
+
+```javascript
+// backend/src/lib/utils.js (example of generateToken function, not directly in context but implied)
+import jwt from "jsonwebtoken";
+
+export const generateToken = (userId, res) => {
+    const token = jwt.sign({ userId }, process.env.JWT_SECRET, {
+        expiresIn: "15d",
+    });
+
+    res.cookie("jwt", token, {
+        maxAge: 15 * 24 * 60 * 60 * 1000, // 15 days
+        httpOnly: true, // Prevent client-side JS access
+        sameSite: "strict", // CSRF protection
+    });
+};
+```
+
+### `protectRoute` Middleware
+
+The `protectRoute` middleware is used to secure API endpoints that require authenticated users. It verifies the JWT from the `jwt` cookie.
+
+```javascript
+// backend/src/middleware/auth.middleware.js
+export const protectRoute = async (req, res, next) => {
+    try {
+        const token = req.cookies.jwt;
+        if(!token){
+            return res.status(401).json({message: "Unauthorized - No Token Provided"});
+        }
+
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+        if(!decoded) {
+            return res.status(401).json({message: "Unauthorized - Invalid Token"});
+        }
+        const user = await User.findById(decoded.userId).select("-password"); // Exclude password
+
+        if(!user) {
+            return res.status(404).json({message: "User not found"});
+        }
+        req.user = user; // Attach user object to request
+        next();
+    } catch (error) {
+        console.log("Error in protectRoute middleware", error.message);
+        res.status(500).json({message: "Internal Server Error"});
+    }
+};
+```
+
+This middleware is applied to routes such as `updateProfile` and `checkAuth`.
+
+```javascript
+// backend/src/routes/auth.route.js
+router.put("/update-profile", protectRoute ,updateProfile)
+router.get("/check", protectRoute, checkAuth)
+```
+
+## User Profile Management
+
+Users can update their profile information, including their username and profile picture.
+
+### Profile Updates
+
+The `updateProfile` controller handles profile modifications. It validates the new username, checks for availability, and uses `cloudinary` for image uploads if a new profile picture is provided.
+
+```javascript
+// backend/src/controllers/auth.controller.js
+export const updateProfile = async (req, res) => {
+    try {
+        const { profilePic, username } = req.body;
+        const userId = req.user._id;
+        // ... (fetch user) ...
+
+        const fieldsToUpdate = {};
+        let newUsername = username ? username.trim() : null;
+
+        if (newUsername && newUsername !== userToUpdate.username) {
+            // ... (username validation) ...
+            const existingUserWithNewUsername = await User.findOne({ username: newUsername, _id: { $ne: userId } });
+            if (existingUserWithNewUsername) {
+                return res.status(400).json({ message: "This username is already taken by someone else." });
+            }
+            fieldsToUpdate.username = newUsername;
+        }
+
+        if (profilePic) {
+            const uploadResponse = await cloudinary.uploader.upload(profilePic);
+            fieldsToUpdate.profilePic = uploadResponse.secure_url;
+        }
+
+        // ... (update user in DB) ...
+        const updatedUser = await User.findByIdAndUpdate(userId, { $set: fieldsToUpdate }, { new: true });
+        generateToken(updatedUser._id, res); // Refresh JWT cookie
+        res.status(200).json(updatedUser);
+
+    } catch (error) {
+        // ... (error handling) ...
+    }
+};
+```
+
+## Key Takeaways
+
+*   User authentication is secured using bcrypt for password hashing and JWTs for session management.
+*   Google OAuth 2.0 provides an alternative, secure authentication method.
+*   The `protectRoute` middleware ensures that sensitive API endpoints are only accessible by authenticated users.
+*   User profile information, including usernames and profile pictures, can be updated securely.
+*   Username availability checks prevent duplicate usernames during signup and profile updates.

@@ -1,0 +1,192 @@
+---
+title: "Real-time Functionality"
+description: "Explains the implementation of real-time features using WebSockets."
+sidebar_position: 31
+---
+# Real-time Functionality
+
+PollMap leverages WebSockets to provide a dynamic and interactive experience for users. This real-time functionality ensures that poll updates, such as votes, are reflected instantaneously across all connected clients without requiring manual page refreshes. The implementation involves setting up a WebSocket server, establishing client connections, and defining specific event handlers for different real-time interactions.
+
+## WebSocket Server and Client Integration
+
+The core of the real-time functionality is managed by Socket.IO. On the server-side, `server/socket/poll.socket.js` sets up the Socket.IO server and defines handlers for various WebSocket events like `connection`, `joinPoll`, `vote`, and `disconnect`.
+
+On the client-side, `client/src/context/SocketContext.jsx` provides a React context for managing the WebSocket connection. This context ensures that the socket connection is established once when the application mounts and that the socket instance is available throughout the component tree.
+
+```jsx
+// client/src/context/SocketContext.jsx
+import React, {createContext, useContext, useEffect, useState} from 'react';
+import io from 'socket.io-client';
+
+const SocketContext = createContext();
+
+export const useSocketContext = () => {
+    return useContext(SocketContext);
+};
+
+export const SocketContextProvider = ({children}) => {
+    const [socket, setSocket] = useState(null);
+
+    useEffect(() => {
+        const socket = io("http://localhost:5001");
+        setSocket(socket);
+
+        socket.on("connect", () => {
+            console.log("Connected to socket server with ID:", socket.id);
+        });
+        socket.on("disconnect", () => {
+            console.log("Disconnected from socket server");
+        });
+        return () => socket.close();
+    }, []);
+
+    return (
+        <SocketContext.Provider value={{ socket }}>
+            {children}
+        </SocketContext.Provider>
+    );
+};
+```
+
+The `client/src/socket.js` file also demonstrates a direct way to initialize the socket connection, which can be used for simpler integrations or specific module needs.
+
+```javascript
+// client/src/socket.js
+import {io} from 'socket.io-client';
+
+const SOCKET_URL = "http://localhost:5001";
+
+export const socket = io(SOCKET_URL, {
+    withCredentials: true,
+});
+
+export default socket;
+```
+
+## Real-time Voting and Updates
+
+When a user casts a vote, the `handleVote` function in `server/socket/poll.socket.js` is triggered. This function performs several key operations:
+
+1.  **Validation**: It checks for the validity of the vote data, ensuring `pollId` and `optionId` are present.
+2.  **Duplicate Vote Check**: If a `userId` is provided, it queries the database to prevent duplicate votes from the same user in a given poll.
+3.  **Vote Recording**: The vote is inserted into the `votes` table in the database.
+4.  **Vote Count Update**: A stored procedure (`increment_vote`) is called to update the `votes_count` for the selected option.
+5.  **Cache Invalidation**: Crucially, the cache for the specific poll is invalidated to ensure that subsequent requests fetch fresh data.
+6.  **Data Fetching and Caching**: The updated poll data is fetched, re-cached, and then broadcast.
+7.  **Broadcasting**: The updated poll results are broadcast to all clients connected to the specific poll's room using `io.to(data.pollId).emit("pollDataUpdated", { data: pollData })`. This ensures all participants see the latest vote counts in real-time.
+
+```javascript
+// server/socket/poll.socket.js
+    const handleVote = async (data) => {
+      console.log("Vote received:", data);
+      
+      if (!data || !data.pollId || !data.optionId) {
+        socket.emit("pollError", { message: "Invalid vote data" });
+        return;
+      }
+      
+      try {
+        // ... (validation and duplicate vote check) ...
+        
+        // Record the vote in the database
+        const { data: vote, error: voteError } = await supabase
+          .from('votes')
+          .insert([{
+            poll_id: data.pollId,
+            option_id: data.optionId,
+            user_id: data.userId || null
+          }]);
+          
+        if (voteError) throw voteError;
+        
+        // Update the vote count for the option
+        const { error: updateError } = await supabase.rpc('increment_vote', {
+          option_id: data.optionId
+        });
+        
+        if (updateError) throw updateError;
+        
+        // Invalidate cache for this poll
+        await cacheService.invalidatePollCache(data.pollId);
+        
+        // Get updated poll data
+        const pollData = await getPollDataService(data.pollId);
+        
+        // Re-cache the updated poll
+        await cacheService.cachePoll(data.pollId, pollData);
+        
+        // Broadcast updated results to all clients in the poll room
+        io.to(data.pollId).emit("pollDataUpdated", { data: pollData });
+        console.log("Poll data updated and broadcasted");
+        
+      } catch (error) {
+        console.error("Error processing vote:", error);
+        socket.emit("pollError", { message: "Failed to process vote" });
+      }
+    };
+```
+
+## Joining Poll Rooms
+
+To facilitate targeted broadcasting of updates, users can join specific poll rooms. The `handleJoinPoll` function in `server/socket/poll.socket.js` handles this:
+
+```javascript
+// server/socket/poll.socket.js
+    // Joining a poll room
+    const handleJoinPoll = (pollId) => {
+      if (!pollId) {
+        socket.emit("pollError", { message: "Poll ID is required" });
+        return;
+      }
+      socket.join(pollId);
+      console.log(`User ${socket.id} joined poll room: ${pollId}`);
+      socket.emit("joinedPoll", { pollId });
+    };
+```
+
+When a client wishes to join a poll room, it emits a `joinPoll` event with the `pollId`. The server then adds the socket to a room named after the `pollId`. This allows subsequent events, like vote updates, to be sent only to clients within that specific poll's room.
+
+## Real-time Data Fetching with Caching
+
+The `handleGetPoll` and `handleGetPolls` functions in `server/socket/poll.socket.js` are designed for fetching poll data in real-time, enhanced with caching.
+
+-   `handleGetPoll`: First attempts to retrieve poll data from a Redis cache. If not found, it fetches the data from Supabase, caches it, and then sends it to the client.
+-   `handleGetPolls`: Fetches a list of polls, also utilizing caching for paginated results.
+
+This approach ensures that frequently accessed poll data is served quickly from the cache, reducing database load, while still allowing for real-time updates through cache invalidation upon voting.
+
+```javascript
+// server/socket/poll.socket.js
+    // Get single poll with cache
+    const handleGetPoll = async (pollId, callback) => {
+      try {
+        // Try cache first
+        const cachedPoll = await cacheService.getCachedPoll(pollId);
+        if (cachedPoll) {
+          callback({ data: cachedPoll });
+          console.log(`Served poll ${pollId} from cache`);
+          return;
+        }
+
+        // If not cached, fetch from database
+        const pollData = await getPollDataService(pollId);
+        
+        // Cache the result
+        await cacheService.cachePoll(pollId, pollData);
+
+        callback({ data: pollData });
+        console.log(`Fetched and cached poll: ${pollId}`);
+      } catch (error) {
+        console.error('Error fetching poll:', error);
+        callback({ error: 'Failed to fetch poll' });
+      }
+    };
+```
+
+## Key Takeaways
+
+-   WebSockets are used for instant updates of poll results without client-side polling.
+-   Socket.IO facilitates the real-time communication layer between server and clients.
+-   Users join specific "rooms" based on poll IDs to receive targeted updates.
+-   Voting events trigger database updates, cache invalidation, and real-time broadcasting of results.
+-   Caching mechanisms are employed for efficient retrieval of poll data, balancing real-time needs with performance.

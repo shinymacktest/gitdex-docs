@@ -1,0 +1,132 @@
+---
+title: "Core Domain Models"
+description: "Defines the primary data structures and entities that represent users and videos within the system."
+sidebar_position: 2
+---
+# Core Domain Models
+
+This section defines the fundamental data structures representing users and videos within the streaming application. These entities form the backbone of the system, managing user accounts and video content.
+
+## Users Entity
+
+The `Users` entity represents a registered user in the system. It implements `UserDetails` from Spring Security, providing essential information for authentication and authorization.
+
+```java
+@Entity
+@Getter
+@Setter
+@AllArgsConstructor
+@NoArgsConstructor
+@Builder
+public class Users implements UserDetails {
+    @Id
+    @GeneratedValue(strategy = GenerationType.UUID)
+    private UUID id;
+    @Column(unique = true, nullable = false)
+    private String email;
+    private String password;
+    @CreationTimestamp
+    @Column(nullable = false, updatable = false)
+    private Instant createdAt;
+    @OneToMany(mappedBy = "user", cascade = CascadeType.ALL, orphanRemoval = true)
+    @JsonIgnore
+    private List<Video> videos = new ArrayList<>();
+
+    @Override
+    public Collection<? extends GrantedAuthority> getAuthorities() {
+        return List.of();
+    }
+
+    @Override
+    public String getUsername() {
+        return this.email;
+    }
+
+    // ... other UserDetails methods
+}
+```
+
+Key attributes include a unique `id`, `email`, `password`, and `createdAt` timestamp. It also maintains a list of associated `Video` entities.
+
+## Video Entity
+
+The `Video` entity represents a video uploaded to the platform. It stores metadata about the video and its association with a specific user.
+
+```java
+@Entity
+@Getter
+@Setter
+@AllArgsConstructor
+@NoArgsConstructor
+@Builder
+public class Video {
+    @Id
+    private String videoId;
+    @Column(nullable = false)
+    private String title;
+    private String description;
+    private String contentType;
+    private String filePath;
+    @CreationTimestamp
+    @Column(nullable = false, updatable = false)
+    private Instant uploadedAt;
+    @ManyToOne(fetch = FetchType.LAZY)
+    @JoinColumn(name = "user_id")
+    @JsonIgnoreProperties({"hibernateLazyInitializer", "handler"})
+    private Users user;
+}
+```
+
+This entity includes fields like `videoId`, `title`, `description`, `contentType`, `filePath`, and `uploadedAt`. The `@ManyToOne` relationship with `Users` establishes that each video belongs to a single user.
+
+## UserPrincipal Class
+
+The `UserPrincipal` class acts as a security wrapper around the `Users` entity, implementing Spring Security's `UserDetails` interface. It's used to represent the currently authenticated user.
+
+```java
+public class UserPrincipal implements UserDetails {
+
+    private Users user;
+    public UserPrincipal(Users user) {
+        this.user = user;
+    }
+
+    @Override
+    public Collection<? extends GrantedAuthority> getAuthorities() {
+        return Collections.singleton(new SimpleGrantedAuthority("USER"));
+    }
+
+    @Override
+    public String getPassword() {
+        return user.getPassword();
+    }
+
+    @Override
+    public String getUsername() {
+        return user.getUsername();
+    }
+
+    public String getEmail() {return user.getEmail();};
+
+    // ... other UserDetails methods
+}
+```
+
+It delegates core `UserDetails` methods to the underlying `Users` object, providing a standardized way for Spring Security to interact with user information.
+
+## Integration Details
+
+The `Users` and `Video` entities are linked through a `@ManyToOne` and `@OneToMany` relationship, respectively. The `UserPrincipal` facilitates the integration of user data with Spring Security's authentication and authorization mechanisms. The use of `@JsonIgnore` on the `videos` list in `Users` and `@JsonIgnoreProperties` in `Video` helps prevent infinite recursion during JSON serialization when dealing with bidirectional relationships.
+
+
+
+
+
+```mermaid
+graph TD
+    "User" --> "Users Entity"
+    "Users Entity" --> "UserPrincipal"
+    "Users Entity" -- "uploads" --> "Video Entity"
+    "Video Entity" --> "Users Entity"
+```
+

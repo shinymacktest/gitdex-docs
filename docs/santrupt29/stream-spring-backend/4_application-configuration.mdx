@@ -1,0 +1,122 @@
+---
+title: "Application Configuration"
+description: "Explains the various configuration aspects of the application, including security and external services."
+sidebar_position: 4
+---
+# Application Configuration
+
+This section details the configuration aspects of the Stream application, covering security and integration with external services like AWS S3.
+
+## Security Configuration
+
+The `SecurityConfig` class establishes the security framework for the application, focusing on authentication and authorization. It leverages JWT (JSON Web Token) for stateless authentication.
+
+-   **Authentication**: The application uses a `DaoAuthenticationProvider` which integrates with a `UserDetailsService` to fetch user credentials and a `BCryptPasswordEncoder` for secure password hashing.
+-   **Authorization**:
+    -   Public endpoints like `/register` and `/login` are permitted for all users.
+    -   All other requests require authentication (`.anyRequest().authenticated()`).
+-   **Session Management**: Sessions are managed using `SessionCreationPolicy.STATELESS`, meaning no server-side session is maintained, and each request is authenticated independently.
+-   **JWT Integration**: A `JwtFilter` is added before the `UsernamePasswordAuthenticationFilter` to process JWT tokens for authentication.
+-   **CORS and CSRF**: CORS is enabled with default settings, and CSRF protection is disabled for simplicity in this stateless architecture.
+
+```java
+@Configuration
+@EnableWebSecurity
+@AllArgsConstructor
+public class SecurityConfig {
+
+    private final JwtFilter jwtFilter;
+    private final UserDetailsService userDetailsService;
+
+    @Bean
+    public SecurityFilterChain securityFilterChain(
+            HttpSecurity http) throws Exception {
+        return http
+                .cors(Customizer.withDefaults())
+                .csrf(customizer -> customizer.disable())
+                .authorizeHttpRequests(request -> request
+                        .requestMatchers("register", "login")
+                        .permitAll()
+                        .anyRequest().authenticated())
+                .httpBasic(Customizer.withDefaults())
+                .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
+                .addFilterBefore(jwtFilter, UsernamePasswordAuthenticationFilter.class)
+                .build();
+    }
+
+    @Bean
+    public AuthenticationProvider authenticationProvider() {
+        DaoAuthenticationProvider provider = new DaoAuthenticationProvider();
+        provider.setPasswordEncoder(new BCryptPasswordEncoder(12));
+        provider.setUserDetailsService(userDetailsService);
+        return provider;
+    }
+
+    @Bean
+    public AuthenticationManager authenticationManager(AuthenticationConfiguration config) throws Exception {
+        return config.getAuthenticationManager();
+    }
+}
+```
+
+## AWS S3 Configuration
+
+The `S3Config` class provides the necessary configuration to interact with AWS S3 for file storage. It defines a bean for `AmazonS3` which can be injected and used throughout the application.
+
+-   **Credentials**: Access Key and Secret Key are retrieved from application properties (`cloud.aws.credentials.access-key`, `cloud.aws.credentials.secret-key`).
+-   **Endpoint and Region**: The S3 endpoint and region are also configured via application properties (`cloud.aws.endpoint`, `cloud.aws.region.static`).
+-   **S3 Client**: An `AmazonS3` client is instantiated using these configurations, enabling operations like uploading and downloading files to S3.
+
+```java
+@Configuration
+public class S3Config {
+
+    @Value("${cloud.aws.credentials.access-key}")
+    private String accessKey;
+
+    @Value("${cloud.aws.credentials.secret-key}")
+    private String secretKey;
+
+    @Value("${cloud.aws.endpoint}")
+    private String endPoint;
+
+    @Value("${cloud.aws.region.static}")
+    private String region;
+
+    @Bean
+    public AmazonS3 s3Client() {
+        BasicAWSCredentials credentials = new BasicAWSCredentials(
+                accessKey,
+                secretKey
+        );
+
+        return AmazonS3ClientBuilder.standard()
+                .withEndpointConfiguration(new AwsClientBuilder.EndpointConfiguration(
+                        endPoint,
+                        region
+                ))
+                .withCredentials(new AWSStaticCredentialsProvider(credentials))
+                .build();
+    }
+}
+```
+
+## Application Constants
+
+The `AppConstants` class centralizes application-wide constants. This promotes consistency and makes it easier to manage common values.
+
+-   **Chunk Size**: `CHUNK_SIZE` is defined as 1MB (`1024*1024` bytes), likely used for file processing or uploads.
+
+```java
+package com.stream.app;
+
+public class AppConstants {
+    public static final int CHUNK_SIZE=1024*1024; // 1MB
+}
+```
+
+## Key Takeaways
+
+-   The application employs a robust security setup with JWT-based stateless authentication and authorization.
+-   AWS S3 is configured for external file storage, allowing for scalable and reliable data management.
+-   Centralized constants in `AppConstants` improve maintainability and code clarity.

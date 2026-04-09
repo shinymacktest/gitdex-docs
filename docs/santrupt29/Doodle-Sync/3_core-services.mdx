@@ -1,0 +1,141 @@
+---
+title: "Core Services"
+description: "Describes the functionalities and responsibilities of the main backend services."
+sidebar_position: 3
+---
+# Core Services
+
+Doodle-Sync is comprised of several independent microservices, each responsible for a specific domain within the application. This modular architecture allows for scalability, maintainability, and independent development.
+
+## User Service
+
+The User Service is the central point for managing user accounts, authentication, and profiles. It handles user registration, login, and stores essential user data.
+
+```java
+package com.pm.userservice;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+
+@SpringBootApplication
+public class UserServiceApplication {
+    public static void main(String[] args) {
+        SpringApplication.run(UserServiceApplication.class, args);
+    }
+}
+```
+
+## Game Service
+
+The Game Service orchestrates the game logic, including game creation, player management, turn progression, and scorekeeping. It integrates with other services to facilitate real-time gameplay. It also utilizes Kafka for event-driven communication, as seen in its `CommandLineRunner` bean for sending draw events.
+
+```java
+package com.pm.gameservice;
+
+import org.springframework.boot.CommandLineRunner;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.cloud.client.discovery.EnableDiscoveryClient;
+import org.springframework.cloud.openfeign.EnableFeignClients;
+import org.springframework.context.annotation.Bean;
+import org.springframework.data.mongodb.config.EnableMongoAuditing;
+import org.springframework.kafka.core.KafkaTemplate;
+
+@SpringBootApplication
+@EnableDiscoveryClient
+@EnableMongoAuditing    // required for @CreatedDate to auto-fill
+@EnableFeignClients
+public class GameServiceApplication {
+
+    @Bean
+    public CommandLineRunner testKafka(
+            KafkaTemplate<String, String> kafka) {
+        return args -> {
+            kafka.send("draw-events", "room-001", "hello-from-game-service");
+            System.out.println("Kafka: message sent to draw-events");
+        };
+    }
+
+    public static void main(String[] args) {
+        SpringApplication.run(GameServiceApplication.class, args);
+    }
+}
+```
+
+## Drawing Service
+
+The Drawing Service is responsible for managing the canvas state, drawing updates, and potentially stroke data. It likely interacts with the Game Service to synchronize drawing actions across players. It also leverages Redis for caching or state management, indicated by the presence of `RedisTemplate`.
+
+```java
+package com.pm.drawingservice;
+
+import org.springframework.beans.factory.annotation.Qualifier;
+import org.springframework.boot.CommandLineRunner;
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+import org.springframework.cloud.client.discovery.EnableDiscoveryClient;
+import org.springframework.context.annotation.Bean;
+import org.springframework.data.redis.core.RedisTemplate;
+
+@SpringBootApplication
+@EnableDiscoveryClient
+public class DrawingServiceApplication {
+
+    public static void main(String[] args) {
+        SpringApplication.run(DrawingServiceApplication.class, args);
+    }
+}
+```
+
+## Chat Service
+
+The Chat Service handles real-time messaging between players within a game room. It provides functionality for sending and receiving chat messages, ensuring communication remains seamless during gameplay.
+
+```java
+package com.pm.chatservice;
+
+import org.springframework.boot.SpringApplication;
+import org.springframework.boot.autoconfigure.SpringBootApplication;
+
+@SpringBootApplication
+public class ChatServiceApplication {
+
+    public static void main(String[] args) {
+        SpringApplication.run(ChatServiceApplication.class, args);
+    }
+}
+```
+
+## Integration Overview
+
+The services are designed to work together, leveraging service discovery (indicated by `@EnableDiscoveryClient`) to locate and communicate with each other. The Game Service acts as a central orchestrator, interacting with the Drawing Service for canvas updates, the Chat Service for player communication, and the User Service for player information.
+
+
+
+
+
+```mermaid
+graph TD
+    subgraph Backend Services
+        UserService["User Service"]
+        GameService["Game Service"]
+        DrawingService["Drawing Service"]
+        ChatService["Chat Service"]
+    end
+
+    UserService -->|User Auth/Data| GameService
+    GameService -->|Canvas State/Updates| DrawingService
+    GameService -->|Player Chat| ChatService
+    DrawingService -->|Drawing Events (Kafka)| GameService
+    ChatService -->|Messages| GameService
+```
+
+
+
+## Key Takeaways
+
+*   **Microservice Architecture**: Each core functionality is encapsulated in its own service.
+*   **Service Discovery**: Services can find and communicate with each other dynamically.
+*   **Event-Driven Communication**: Kafka is used for asynchronous event handling, particularly for drawing events.
+*   **Data Persistence**: Services like User Service and Game Service likely employ databases for data storage.
+*   **Caching/State Management**: Drawing Service utilizes Redis, suggesting efficient state handling.

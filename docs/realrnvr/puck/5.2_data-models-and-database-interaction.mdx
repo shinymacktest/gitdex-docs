@@ -1,0 +1,167 @@
+---
+title: "Data Models and Database Interaction"
+description: "Explains the database models and how the server interacts with the data store."
+sidebar_position: 52
+---
+# Data Models and Database Interaction
+
+Puck utilizes MongoDB as its primary data store, with Mongoose providing an Object Data Modeling (ODM) layer. This section details the various data models and how the server interacts with the database to manage and retrieve information.
+
+## Database Connection
+
+The database connection is managed by the `connectDB` function in `server/connectDB/connectDB.js`. This function takes a MongoDB connection URL and establishes a connection using `mongoose.connect`.
+
+```javascript
+import mongoose from "mongoose";
+
+export const connectDB = (url) => {
+  return mongoose.connect(url);
+};
+```
+
+## Data Models
+
+Puck defines several Mongoose schemas to represent different entities:
+
+### User Authentication (`auth.js`)
+
+The `UserSchema` in `server/models/auth.js` handles user authentication and profile information. It includes fields for username, email, password (with hashing), user type (normal, google, both), Google OAuth ID, verification status, and various tokens for email verification, password reset, and refresh.
+
+Key features of the `UserSchema`:
+*   **Password Hashing**: Passwords are automatically hashed using `bcryptjs` before being saved.
+*   **Token Generation**: Methods are provided to generate JWTs for access, refresh, verification, and password reset.
+*   **Email Verification**: The `isVerified` flag and `verificationToken` manage the email verification process.
+
+```javascript
+import mongoose from "mongoose";
+import jwt from "jsonwebtoken";
+import bcryptjs from "bcryptjs";
+
+const UserSchema = new mongoose.Schema({
+  username: {
+    type: String,
+    required: [true, "Please provide a username"],
+    minlength: 4,
+    maxlength: 50,
+    unique: true,
+  },
+  email: {
+    type: String,
+    required: [true, "Please provide an email"],
+    match: [
+      /^(([^<>()[\]\\.,;:\s@"]+(\.[^<>()[\]\\.,;:\s@"]+)*)|(".+"))@((\[[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\])|(([a-zA-Z\-0-9]+\.)+[a-zA-Z]{2,}))$/,
+      "Please provide a valid email",
+    ],
+    unique: true,
+    trim: true,
+  },
+  password: {
+    type: String,
+    required: function () {
+      return !this.googleId;
+    },
+    validate: {
+      validator: function (value) {
+        return !value || value.length >= 8;
+      },
+      message: "Password must be at least 8 characters long.",
+    },
+  },
+  // ... other fields
+});
+
+// ... methods for password verification and token creation
+```
+
+### Manga (`manga.js`)
+
+The `MangaSchema` in `server/models/manga.js` stores information about manga titles. It includes the manga's title, a unique `mangaId`, the `authorId`, and an optional description.
+
+```javascript
+import mongoose from "mongoose";
+
+const MangaSchema = new mongoose.Schema({
+  title: { type: String, required: [true, "please provide manga title"] },
+  mangaId: {
+    type: String,
+    required: [true, "please provide manga id"],
+    unique: true,
+  },
+  authorId: { type: String, required: [true, "please provide author id"] },
+  description: { type: String },
+});
+```
+
+### Client Association (`client.js`)
+
+The `ClientSchema` in `server/models/client.js` defines a relationship between users and manga, likely representing a user's interest or subscription to a particular manga. It links a `mangaTitle` and `mangaId` to an `authorId` and records which `User` (`createdBy`) created this association. It also includes timestamps for creation and updates.
+
+```javascript
+import mongoose from "mongoose";
+
+const ClientSchema = new mongoose.Schema(
+  {
+    mangaTitle: {
+      type: String,
+      required: [true, "please provide manga title"],
+    },
+    mangaId: {
+      type: String,
+      required: [true, "please provide manga id"],
+    },
+    authorId: {
+      type: String,
+      required: [true, "please provide author id"],
+    },
+    createdBy: {
+      type: mongoose.Types.ObjectId,
+      ref: "User",
+      required: [true, "Please provide a valid user"],
+    },
+  },
+  { timestamps: true }
+);
+```
+
+## Database Interaction Flow
+
+The server interacts with these models to perform CRUD (Create, Read, Update, Delete) operations. For instance, when a user registers, a new document is created in the `User` collection. When new manga is added, a document is created in the `Manga` collection. User-manga associations are managed within the `Client` collection.
+
+
+
+
+
+```mermaid
+graph TD
+    A["Client Application"] --> B["API Server"];
+    B --> C["Database (MongoDB)"];
+    C --> B;
+    B --> A;
+
+    subgraph API Server
+        B1["Auth Controller"] --> B2["User Model"];
+        B3["Manga Controller"] --> B4["Manga Model"];
+        B5["Client Controller"] --> B6["Client Model"];
+        B2 -- Reads/Writes --> C;
+        B4 -- Reads/Writes --> C;
+        B6 -- Reads/Writes --> C;
+    end
+
+    subgraph Database (MongoDB)
+        C1["Users Collection"]
+        C2["Manga Collection"]
+        C3["Clients Collection"]
+        C1 -- Stores --> B2;
+        C2 -- Stores --> B4;
+        C3 -- Stores --> B6;
+    end
+```
+
+
+
+## Key Takeaways
+
+*   Puck uses Mongoose to define and interact with its MongoDB data models.
+*   Separate schemas are employed for user authentication, manga information, and user-manga client associations.
+*   The database connection is centralized and managed by a dedicated function.
+*   Models include built-in validation and pre-save hooks for tasks like password hashing and token generation.

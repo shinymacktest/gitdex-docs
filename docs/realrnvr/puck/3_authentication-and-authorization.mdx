@@ -1,0 +1,465 @@
+---
+title: "Authentication and Authorization"
+description: "Covers user authentication flows, authorization mechanisms, and related services."
+sidebar_position: 3
+---
+# Authentication and Authorization
+
+This section outlines the authentication and authorization mechanisms employed by Puck, detailing user flows, security measures, and related services.
+
+## User Authentication Flows
+
+Puck supports multiple authentication strategies to provide flexibility and security for users. These include:
+
+*   **Email/Password Authentication**: A traditional method involving email and password for login and signup.
+*   **OAuth 2.0 (Google)**: Integration with Google's OAuth 2.0 service allows users to authenticate using their Google accounts.
+
+### Signup Flow
+
+The signup process is initiated via the `signup` mutation. After providing an email, a verification email is sent to the user.
+
+```javascript
+// client/src/services/mutation/authMutation.js
+export const signup = (data) => {
+  return axiosInstance.post("/api/v1/auth/signup", data);
+};
+```
+
+The server handles user creation and sends a verification link. If a user with the same email already exists but is not verified, a conflict is returned, prompting the user to verify their existing account.
+
+```javascript
+// server/controller/auth.js
+export const signup = async (req, res) => {
+  const { email } = req.body;
+  if (!email) {
+    throw new BadRequestError("Please provide email");
+  }
+
+  const existingUser = await User.findOne({ email });
+  if (existingUser && !existingUser.isVerified) {
+    return res.status(StatusCodes.CONFLICT).json({
+      type: "verification-incomplete",
+      message: "Account exists but is not verified, please verify your email",
+      email: existingUser.email,
+    });
+  }
+
+  const user = await User.create({ ...req.body });
+
+  const verificationToken = user.verificationToken;
+
+  const verificationLink = `${process.env.CLIENT_APP_URL}/verified/${verificationToken}`;
+
+  mailer({
+    to: user.email,
+    subject: "Email Address Verification",
+    html: mailTemplate({
+      username: user.username,
+      redirect: verificationLink,
+      template: "email-verification",
+    }),
+  });
+
+  return res.status(StatusCodes.CREATED).json({ user });
+};
+```
+
+### Email Verification
+
+Upon successful signup, users receive an email with a verification link. Navigating this link triggers the `verification` endpoint on the server, which validates the token, marks the user as verified, and issues JWT access and refresh tokens.
+
+```javascript
+// server/controller/auth.js
+export const verification = async (req, res) => {
+  const { verificationId } = req.params;
+  if (!verificationId) {
+    throw new UnauthorziedError("Unauthorized.");
+  }
+
+  const payload = jwt.verify(
+    verificationId,
+    process.env.JWT_VERIFICATION_SECRET
+  );
+
+  const user = await User.findOne({ email: payload.email });
+  if (!user) {
+    throw new NotFoundError("User is not Found.");
+  }
+  if (user.isVerified) {
+    throw new BadRequestError("User is already verified.");
+  }
+
+  if (verificationId !== user.verificationToken) {
+    throw new UnauthorziedError("Use latest sent verification link.");
+  }
+  user.isVerified = true;
+  await user.save();
+
+  const accessToken = user.createAccessToken();
+  const refreshToken = user.createRefreshToken();
+  setRefreshTokenCookie(res, refreshToken);
+
+  return res.status(StatusCodes.OK).json({
+    user: { username: user.username, email: user.email },
+    accessToken,
+  });
+};
+```
+
+Users can also request a new verification email using the `reverification` mutation.
+
+```javascript
+// client/src/services/mutation/authMutation.js
+export const reverification = (email) => {
+  return axiosInstance.post("/api/v1/auth/resendVerification", { email });
+};
+```
+
+### Login Flow
+
+The login process begins with `loginAuthOne`, which checks the user's email. Based on whether the user has a password set or is a Google-only user, it directs to either `loginTwo` (for email/password) or `loginGoogleAuth` (for initial Google password setup).
+
+```javascript
+// server/controller/auth.js
+export const loginAuthOne = async (req, res) => {
+  const { email } = req.body;
+  if (!email) {
+    throw new BadRequestError("Please Provide a email.");
+  }
+
+  const user = await User.findOne({ email });
+  if (!user) {
+    throw new NotFoundError("no account found with this email.");
+  }
+
+  if (!user.isVerified) {
+    return res.status(StatusCodes.CONFLICT).json({
+      message: "user is not verified",
+      type: "email",
+      email: user.email,
+    });
+  }
+
+  if (!user.password) {
+    return res
+      .status(StatusCodes.OK)
+      .json({ user, navigate: "loginGoogleAuth" });
+  }
+
+  return res.status(StatusCodes.OK).json({ user, navigate: "loginTwo" });
+};
+```
+
+For email/password logins, `loginAuthTwo` authenticates the user and establishes sessions.
+
+```javascript
+// client/src/services/mutation/authMutation.js
+export const loginAuthTwo = (data) => {
+  return axiosInstance.post("/api/v1/auth/loginAuthTwo", data);
+};
+```
+
+### Google OAuth 2.0 Flow
+
+The `google` endpoint handles the Google OAuth 2.0 authentication. It exchanges the authorization code for tokens, verifies the user's identity via Google, and either creates a new user or updates an existing one. Access and refresh tokens are then generated and set in cookies.
+
+```javascript
+// server/controller/auth.js
+export const google = async (req, res) => {
+  const { code } = req.body;
+
+  if (!code) {
+    throw new UnauthorziedError("Please provide Google auth code!");
+  }
+
+  const { tokens } = await oauthClient.getToken(code);
+  if (!tokens) {
+    throw new UnauthorziedError("Google code is invalid");
+  }
+
+  const { refresh_token, id_token } = tokens;
+
+  const ticket = await oauthClient.verifyIdToken({
+    idToken: id_token,
+    audience: process.env.GOOGLE_CLIENT_ID,
+  });
+
+  if (!ticket) {
+    throw new NotFoundError("User credentials cannot be used");
+  }
+
+  const payload = ticket.getPayload();
+
+  if (!payload) {
+    throw new BadRequestError("User credentials cannot be fetched");
+  }
+
+  const email = payload.email;
+  const googleId = payload.sub;
+  const username = payload.name;
+
+  let user = await User.findOne({ email });
+
+  if (!user) {
+    // User does not exist, create a new user
+    user = new User({
+      email,
+      username,
+      googleId,
+      refreshToken: refresh_token,
+      isVerified: true,
+      type: "google",
+    });
+    await user.save();
+  } else {
+    // User exists
+    if (!user.isVerified) {
+      user.isVerified = true;
+    }
+
+    // Update refresh token if not already stored
+    if (!user.refreshToken && refresh_token) {
+      user.refreshToken = refresh_token;
+    }
+
+    if (user.type === "normal") {
+      user.type = "both";
+    }
+
+    // Save changes only if necessary
+    if (user.isModified()) {
+      await user.save();
+    }
+  }
+
+  // Generate tokens
+  const accessToken = user.createAccessToken();
+  const refreshToken = user.createRefreshToken();
+  setRefreshTokenCookie(res, refreshToken);
+
+  // Return the response
+  return res.status(StatusCodes.OK).json({
+    user: { username: user.username, email: user.email },
+    accessToken,
+  });
+};
+```
+
+## Authorization Mechanisms
+
+Puck utilizes JSON Web Tokens (JWT) for session management and authorization. Access tokens are short-lived and used for authenticated requests, while refresh tokens are long-lived and used to obtain new access tokens.
+
+### Route Protection
+
+Client-side route protection is implemented using guards like `AuthRedirectGaurd` and `ProcessGaurd`.
+
+`AuthRedirectGaurd` ensures that authenticated users are redirected away from login/signup pages and towards the main application, while unauthenticated users are allowed access.
+
+```jsx
+// client/src/services/auth/AuthRedirectGaurd.jsx
+import { Navigate } from "react-router-dom";
+import { useAuth } from "../../hooks/useAuth";
+import PropTypes from "prop-types";
+import Loader from "../../components/ui/loader/Loader";
+
+const AuthRedirectGaurd = ({ children }) => {
+  const { token, mutateTokenPending } = useAuth();
+
+  if (mutateTokenPending) {
+    return (
+      <div className="redirect">
+        <Loader />
+      </div>
+    );
+  }
+
+  if (token) {
+    return <Navigate to="/" replace />;
+  }
+
+  return children;
+};
+
+AuthRedirectGaurd.propTypes = {
+  children: PropTypes.node.isRequired,
+};
+
+export default AuthRedirectGaurd;
+```
+
+`ProcessGaurd` is used to protect routes that require specific conditions to be met, such as having a token stored in `localStorage`.
+
+```jsx
+// client/src/services/auth/ProcessGaurd.jsx
+import { Navigate } from "react-router-dom";
+import PropTypes from "prop-types";
+
+const ProcessGaurd = ({ children, value, to }) => {
+  const parameter = localStorage.getItem(value);
+
+  if (!parameter) {
+    return <Navigate to={to} />;
+  }
+
+  return children;
+};
+
+ProcessGaurd.propTypes = {
+  children: PropTypes.node.isRequired,
+  value: PropTypes.string,
+  to: PropTypes.string,
+};
+
+export default ProcessGaurd;
+```
+
+### Token Refresh
+
+The `refreshToken` endpoint is responsible for issuing new access tokens when the current one expires. It validates the refresh token from the cookies, and if valid, generates a new access token. For Google authenticated users, it also refreshes the Google access token.
+
+```javascript
+// server/controller/auth.js
+export const refreshToken = async (req, res) => {
+  const refreshToken = req.cookies.refreshToken;
+  if (!refreshToken) {
+    return res.status(StatusCodes.NETWORK_AUTHENTICATION_REQUIRED).json({
+      message: "Session expired please login again!",
+      type: "refresh-token-expired",
+    });
+  }
+
+  let payload;
+
+  try {
+    payload = jwt.verify(refreshToken, process.env.JWT_REFRESH_SECRET);
+  } catch (error) {
+    return res
+      .clearCookie("refreshToken")
+      .status(StatusCodes.NETWORK_AUTHENTICATION_REQUIRED)
+      .json({
+        message: "Session expired please login again!",
+        type: "refresh-token-expired",
+      });
+  }
+
+  const { email } = payload;
+
+  const user = await User.findOne({ email });
+  if (!user) {
+    throw new UnauthorziedError("User doesnt exists!");
+  }
+
+  if (!user.refreshToken) {
+    const accessToken = user.createAccessToken();
+    return res.status(StatusCodes.OK).json({ accessToken });
+  }
+
+  const response = await axios.post("https://oauth2.googleapis.com/token", {
+    client_id: process.env.GOOGLE_CLIENT_ID,
+    client_secret: process.env.GOOGLE_CLIENT_SECRET,
+    refresh_token: user.refreshToken,
+    grant_type: "refresh_token",
+  });
+
+  const accessToken = user.createAccessToken();
+  const googleAccessToken = response.data.access_token;
+
+  return res.status(StatusCodes.OK).json({ accessToken, googleAccessToken });
+};
+```
+
+### Logout
+
+The `logout` endpoint invalidates the user's session by clearing the `refreshToken` cookie.
+
+```javascript
+// server/controller/auth.js
+export const logout = (req, res) => {
+  const { refreshToken } = req.cookies;
+
+  if (!refreshToken) {
+    return res
+      .status(StatusCodes.BAD_REQUEST)
+      .json({ message: "No refresh token found. Already logged out?" });
+  }
+
+  res.clearCookie("refreshToken", {
+    httpOnly: true,
+    secure: true,
+    SameSite: "Strict",
+  });
+
+  return res.status(StatusCodes.OK).json({ message: "Logout successful!" });
+};
+```
+
+## Password Management
+
+Puck also provides functionality for password management, including password reset.
+
+### Forgot Password
+
+The `forgotPassword` mutation allows users to initiate a password reset process. An email with a reset link is sent to the user's registered email address.
+
+```javascript
+// client/src/services/mutation/authMutation.js
+export const forgotPassword = (data) => {
+  return axiosInstance.post("/api/v1/auth/forgotPassword", data);
+};
+```
+
+The server generates a unique reset token, stores it, and sends an email containing a link to reset the password.
+
+```javascript
+// server/controller/auth.js
+export const forgotPassword = async (req, res) => {
+  const { email } = req.body;
+  if (!email) {
+    throw new BadRequestError("Please provide email.");
+  }
+
+  const user = await User.findOne({ email });
+  if (!user) {
+    throw new NotFoundError("user not found.");
+  }
+
+  const resetToken = user.createResetToken();
+  user.resetToken = resetToken;
+  await user.save();
+
+  const verificationLink = `${process.env.CLIENT_APP_URL}/reset-password/${resetToken}`;
+
+  await mailer({
+    to: user.email,
+    subject: "Reset Password",
+    html: mailTemplate({
+      username: user.username,
+      redirect: verificationLink,
+      template: "reset-password",
+    }),
+  });
+
+  return res.status(StatusCodes.OK).json({ user, message: "Reset link sent!" });
+};
+```
+
+### Reset Password
+
+The `resetPassword` mutation handles the actual password reset. It verifies the reset token and allows the user to set a new password.
+
+```javascript
+// client/src/services/mutation/authMutation.js
+export const resetPassword = ({ verificationId, data }) => {
+  return axiosInstance.post(
+    `/api/v1/auth/resetPassword/${verificationId}`,
+    data
+  );
+};
+```
+
+## Key Takeaways
+
+*   Puck employs a multi-faceted authentication system supporting email/password and Google OAuth 2.0.
+*   JWTs are used for secure session management and authorization.
+*   Client-side route guards (`AuthRedirectGaurd`, `ProcessGaurd`) enhance security by controlling access to different application states.
+*   Robust password management features, including reset flows, are integrated.

@@ -1,0 +1,507 @@
+---
+title: "API Endpoints and Controllers"
+description: "Details the backend API endpoints, their functionalities, and associated controllers."
+sidebar_position: 51
+---
+# API Endpoints and Controllers
+
+This section details the backend API endpoints, their functionalities, and the controllers responsible for handling requests. The API is designed to serve manga-related data, including manga listings, details, author information, covers, chapters, and search functionalities. Authentication and client-specific operations are handled by separate router modules.
+
+## Manga Endpoints
+
+The `/api/v1/manga` route handles various requests related to manga data.
+
+### List Mangas
+
+Retrieves a paginated list of mangas with optional cursor-based pagination.
+
+*   **Endpoint**: `GET /api/v1/manga/mangas`
+*   **Controller**: `mangas` in `server/controller/manga.js`
+*   **Functionality**: Fetches manga entries, allowing clients to request a specific number of results (`limit`) and continue pagination from a specific point (`cursor`). Caches responses in Redis for performance.
+
+```javascript
+export const mangas = async (req, res) => {
+  const limit = Number(req.query.limit) || 10;
+  const cursor = req.query.cursor;
+
+  let query = {};
+  if (cursor) {
+    query._id = { $gt: cursor };
+  }
+
+  const cacheKey = `mangas:${cursor || "start"}:${limit}`;
+  const expiry = 3600;
+  const cachedManga = await redisClient.get(cacheKey);
+
+  if (cachedManga) {
+    setCacheHeaders({ res, cacheStatus: "HIT", ttl: expiry });
+    return res.status(StatusCodes.OK).json(JSON.parse(cachedManga));
+  }
+
+  const mangaData = await Manga.find(query).sort({ _id: 1 }).limit(limit);
+
+  const hasMore = await Manga.exists({
+    _id: { $gt: mangaData[mangaData.length - 1]?._id },
+  });
+
+  const nextCursor = hasMore ? mangaData[mangaData.length - 1]?._id : null;
+
+  const responseData = {
+    manga: mangaData,
+    nextCursor,
+  };
+
+  await redisClient.setEx(cacheKey, expiry, JSON.stringify(responseData));
+  setCacheHeaders({ res, cacheStatus: "MISS", ttl: expiry });
+
+  res.status(StatusCodes.OK).json(responseData);
+};
+```
+
+### Manga Statistics
+
+Fetches detailed statistics and attributes for a specific manga.
+
+*   **Endpoint**: `GET /api/v1/manga/statics/:mangaId`
+*   **Controller**: `statics` in `server/controller/manga.js`
+*   **Functionality**: Retrieves detailed information about a manga using its ID, including titles, descriptions, publication status, and content rating. Responses are cached in Redis.
+
+```javascript
+export const statics = async (req, res) => {
+  const { mangaId } = req.params;
+
+  if (!mangaId) {
+    throw new BadRequestError("Please provide params");
+  }
+
+  const cacheKey = `statics:${mangaId}`;
+  const expiry = 3600;
+
+  const cachedStatics = await redisClient.get(cacheKey);
+  if (cachedStatics) {
+    setCacheHeaders({ res, cacheStatus: "HIT", ttl: expiry });
+    return res.status(StatusCodes.OK).json({ data: JSON.parse(cachedStatics) });
+  }
+
+  const response = await dexAxios.get(`/manga/${mangaId}`);
+  const staticsData = response.data.data;
+
+  if (!staticsData) {
+    throw new NotFoundError("Manga not found");
+  }
+
+  // ... (data processing and caching logic) ...
+
+  res.status(StatusCodes.OK).json({ data: safeData });
+};
+```
+
+### Author Information
+
+Retrieves details about a manga author.
+
+*   **Endpoint**: `GET /api/v1/manga/author/:authorId`
+*   **Controller**: `author` in `server/controller/manga.js`
+*   **Functionality**: Fetches author information based on their ID. This endpoint utilizes Redis for caching to improve performance.
+
+```javascript
+export const author = async (req, res) => {
+  const { authorId } = req.params;
+
+  if (!authorId) {
+    throw new BadRequestError("Please provide author id");
+  }
+
+  const cacheKey = `author:${authorId}`;
+  const expiry = 3600;
+
+  const cachedAuthor = await redisClient.get(cacheKey);
+  if (cachedAuthor) {
+    setCacheHeaders({ res, cacheStatus: "HIT", ttl: expiry });
+    return res.status(StatusCodes.OK).json({ data: JSON.parse(cachedAuthor) });
+  }
+
+  const response = await dexAxios.get(`/author/${authorId}`);
+
+  const authorData = response.data.data;
+  if (!authorData) {
+    throw new NotFoundError("Author data is not available");
+  }
+
+  await redisClient.setEx(cacheKey, expiry, JSON.stringify(authorData));
+  setCacheHeaders({ res, cacheStatus: "MISS", ttl: expiry });
+
+  res.status(StatusCodes.OK).json({ data: authorData });
+};
+```
+
+### Manga Cover Image
+
+Fetches the URL for a manga's cover image.
+
+*   **Endpoint**: `GET /api/v1/manga/cover/:mangaId`
+*   **Controller**: `cover` in `server/controller/manga.js`
+*   **Functionality**: Provides a URL to a manga cover image, allowing customization of volume order and image width. Responses are cached.
+
+```javascript
+export const cover = async (req, res) => {
+  const {
+    params: { mangaId },
+    query: { volume = "desc", width = 256 },
+  } = req;
+
+  if (!mangaId) {
+    throw new BadRequestError("Provide manga Id");
+  }
+
+  const cacheKey = `cover:${mangaId}:${volume}:${width}`;
+  const expiry = 3600;
+
+  const cachedCover = await redisClient.get(cacheKey);
+  if (cachedCover) {
+    setCacheHeaders({ res, cacheStatus: "HIT", ttl: expiry });
+    const proxyUrl = `${process.env.API_BASE_URL}/api/v1/manga/proxy/cover/${mangaId}/${cachedCover}/${width}`;
+    return res.status(StatusCodes.OK).json({ coverImgUrl: proxyUrl });
+  }
+
+  // ... (API call to dexAxios and response processing) ...
+
+  res.status(StatusCodes.OK).json({ coverImgUrl: proxyUrl });
+};
+```
+
+### Proxy Cover Image
+
+A proxy endpoint to serve cover images, allowing for CORS and caching.
+
+*   **Endpoint**: `GET /api/v1/manga/proxy/cover/:mangaId/:fileName/:width`
+*   **Controller**: `proxyCover` in `server/controller/manga.js`
+*   **Functionality**: Acts as a reverse proxy for cover images, setting appropriate HTTP headers for browser caching and CORS.
+
+```javascript
+export const proxyCover = async (req, res) => {
+  const {
+    params: { mangaId, fileName, width },
+  } = req;
+
+  const response = await coverAxios.get(
+    `/covers/${mangaId}/${fileName}.${width}.jpg`,
+    { responseType: "stream" }
+  );
+
+  // Set cache headers for browsers to cache images
+  res.setHeader("Cache-Control", "public, max-age=86400, immutable");
+  res.setHeader("Content-Type", "image/jpeg");
+  res.setHeader("Access-Control-Allow-Origin", process.env.CLIENT_APP_URL);
+  // ... (CORS headers) ...
+
+  response.data.pipe(res);
+};
+```
+
+### Manga Chapters
+
+Retrieves a list of chapters for a specific manga.
+
+*   **Endpoint**: `GET /api/v1/manga/chapters/:mangaId`
+*   **Controller**: `chapters` in `server/controller/manga.js`
+*   **Functionality**: Fetches chapters for a given manga, with options for limiting the number of results and offsetting the starting point. Responses are cached in Redis.
+
+```javascript
+export const chapters = async (req, res) => {
+  const {
+    params: { mangaId },
+    query: { limit = 10, offset = 0 },
+  } = req;
+
+  if (!mangaId) {
+    throw new BadRequestError("please provide manga id!");
+  }
+
+  const cacheKey = `chapters:${mangaId}:${limit}:${offset}`;
+  const expiry = 3600;
+
+  const cachedChapters = await redisClient.get(cacheKey);
+  if (cachedChapters) {
+    setCacheHeaders({ res, cacheStatus: "HIT", ttl: expiry });
+    return res.status(StatusCodes.OK).json(JSON.parse(cachedChapters));
+  }
+
+  const response = await dexAxios.get(`/chapter`, {
+    params: {
+      manga: mangaId,
+      translatedLanguage: ["en"],
+      limit: limit,
+      offset: offset,
+      order: {
+        volume: "asc",
+        chapter: "asc",
+      },
+      // ... other params
+    },
+  });
+
+  // ... (response processing and caching logic) ...
+
+  res.status(StatusCodes.OK).json(responseObj);
+};
+```
+
+### Chapter Image
+
+Retrieves image URLs for a specific chapter, with quality options.
+
+*   **Endpoint**: `GET /api/v1/manga/chapter-image/:chapterId`
+*   **Controller**: `chapterImage` in `server/controller/manga.js`
+*   **Functionality**: Generates a list of image URLs for a given chapter, supporting different quality levels ('data' and 'data-saver'). Responses are cached for a short duration.
+
+```javascript
+export const chapterImage = async (req, res) => {
+  const {
+    params: { chapterId },
+    query: { quality = "data" },
+  } = req;
+
+  if (!chapterId) {
+    throw new BadRequestError("please provide a valid chapter id");
+  }
+
+  const cacheKey = `chapterImage:${chapterId}:${quality}`;
+  const expiry = 600;
+
+  const cachedChapterImage = await redisClient.get(cacheKey);
+  if (cachedChapterImage) {
+    setCacheHeaders({ res, cacheStatus: "HIT", ttl: expiry });
+    return res.status(StatusCodes.OK).json(JSON.parse(cachedChapterImage));
+  }
+
+  const response = await dexAxios.get(`/at-home/server/${chapterId}`);
+  if (!response.data.baseUrl) {
+    throw new NotFoundError("not found");
+  }
+
+  const {
+    baseUrl,
+    chapter: { hash, data: original, dataSaver },
+  } = response.data;
+
+  const data = quality === "data-saver" ? dataSaver : original;
+  const mangaImgs = data.map((val) => {
+    return {
+      src: `${
+        process.env.API_BASE_URL
+      }/api/v1/manga/proxy/chapter-image/${encodeURIComponent(
+        baseUrl
+      )}/${quality}/${hash}/${val}`,
+    };
+  });
+
+  const responseObj = { data: mangaImgs, length: mangaImgs.length };
+
+  await redisClient.setEx(cacheKey, expiry, JSON.stringify(responseObj));
+  setCacheHeaders({ res, cacheStatus: "MISS", ttl: expiry });
+
+  res.status(StatusCodes.OK).json(responseObj);
+};
+```
+
+### Proxy Chapter Image
+
+A proxy endpoint for serving individual chapter images.
+
+*   **Endpoint**: `GET /api/v1/manga/proxy/chapter-image/:baseUrl/:quality/:hash/:val`
+*   **Controller**: `proxyChapterImage` in `server/controller/manga.js`
+*   **Functionality**: Proxies chapter images from their source, handling CORS and setting content type.
+
+```javascript
+export const proxyChapterImage = async (req, res) => {
+  let { baseUrl, quality, hash, val } = req.params;
+
+  baseUrl = decodeURIComponent(baseUrl);
+
+  const response = await axios.get(`${baseUrl}/${quality}/${hash}/${val}`, {
+    responseType: "stream",
+  });
+  res.setHeader("Content-Type", "image/jpeg");
+  res.setHeader("Access-Control-Allow-Origin", process.env.CLIENT_APP_URL);
+  // ... (CORS headers) ...
+
+  response.data.pipe(res);
+};
+```
+
+### Search Mangas
+
+Searches for mangas based on a query string.
+
+*   **Endpoint**: `GET /api/v1/manga/search`
+*   **Controller**: `search` in `server/controller/manga.js`
+*   **Functionality**: Uses MongoDB's `$search` operator for efficient, fuzzy text searching on manga titles. Results are cached in Redis.
+
+```javascript
+export const search = async (req, res) => {
+  const { query } = req.query;
+
+  const trimmedQuery = query.trim();
+
+  if (!trimmedQuery) {
+    return new BadRequestError("Query cannot be empty.");
+  }
+
+  const cacheKey = `search:${trimmedQuery}`;
+  const expiry = 300;
+
+  const cachedSearch = await redisClient.get(cacheKey);
+  if (cachedSearch) {
+    setCacheHeaders({ res, cacheStatus: "HIT", ttl: expiry });
+    return res.status(StatusCodes.OK).json(JSON.parse(cachedSearch));
+  }
+
+  const manga = await Manga.aggregate([
+    {
+      $search: {
+        index: "default",
+        autocomplete: {
+          query: trimmedQuery,
+          path: "title",
+          tokenOrder: "sequential",
+          fuzzy: {
+            maxEdits: 1,
+            prefixLength: 0,
+          },
+        },
+      },
+    },
+    // ... (projection, sort, limit) ...
+  ]);
+
+  const responseData = {
+    manga,
+  };
+
+  await redisClient.setEx(cacheKey, expiry, JSON.stringify(responseData));
+  setCacheHeaders({ res, cacheStatus: "MISS", ttl: expiry });
+
+  res.status(200).json(responseData);
+};
+```
+
+### Random Manga
+
+Fetches a list of randomly selected mangas.
+
+*   **Endpoint**: `GET /api/v1/manga/random-manga`
+*   **Controller**: `randomManga` in `server/controller/manga.js`
+*   **Functionality**: Utilizes MongoDB's `$sample` operator to return a specified number of random manga entries. Results are cached.
+
+```javascript
+export const randomManga = async (req, res) => {
+  const limit = parseInt(req.query.limit) || 6;
+
+  const cacheKey = `randomManga:${limit}`;
+  const expiry = 300;
+
+  const cachedRandomManga = await redisClient.get(cacheKey);
+  if (cachedRandomManga) {
+    setCacheHeaders({ res, cacheStatus: "HIT", ttl: expiry });
+    return res.status(StatusCodes.OK).json(JSON.parse(cachedRandomManga));
+  }
+
+  const manga = await Manga.aggregate([
+    { $sample: { size: parseInt(limit) } },
+    {
+      $project: {
+        title: 1,
+        mangaId: 1,
+        authorId: 1,
+        description: 1,
+      },
+    },
+  ]);
+
+  const responseData = {
+    manga,
+    length: manga.length,
+  };
+
+  await redisClient.setEx(cacheKey, expiry, JSON.stringify(responseData));
+  setCacheHeaders({ res, cacheStatus: "MISS", ttl: expiry });
+
+  res.status(StatusCodes.OK).json(responseData);
+};
+```
+
+## Authentication Endpoints
+
+The authentication endpoints are managed by the `auth.js` router.
+
+*   **Router**: `server/router/auth.js`
+*   **Functionality**: Handles user registration, login (multiple strategies), token refreshing, logout, password management, and email verification.
+
+```javascript
+import { Router } from "express";
+// ... imports for controllers ...
+
+const router = Router();
+
+router.route("/me").post(me);
+router.route("/loginAuthOne").post(loginAuthOne);
+// ... other auth routes ...
+
+export default router;
+```
+
+## Client Endpoints
+
+Client-specific operations, such as managing favorites and user profile updates, are handled by the `client.js` router.
+
+*   **Router**: `server/router/client.js`
+*   **Functionality**: Allows users to manage their favorite mangas, update their profile information (username, password), and retrieve user-specific data.
+
+```javascript
+import { Router } from "express";
+// ... imports for controllers ...
+
+const router = Router();
+
+router.route("/favourite/:mangaId").get(favourite);
+router.route("/all-favourites").get(Allfavourites);
+// ... other client routes ...
+
+export default router;
+```
+
+## API Architecture Flow
+
+This diagram illustrates a simplified flow for retrieving manga data.
+
+
+
+
+
+```mermaid
+graph TD
+    A["User/Client"] --> B("API Gateway / Express Server");
+    B --> C{Route Handler};
+    C --> D[Manga Controller];
+    D --> E{Cache Check (Redis)};
+    E -- Cache HIT --> F[Return Cached Data];
+    E -- Cache MISS --> G[External API Call (Dex API)];
+    G --> H[Data Processing];
+    H --> I{Cache Data (Redis)};
+    I --> J[Return Processed Data];
+    F --> B;
+    J --> B;
+```
+
+
+
+## Key Takeaways
+
+*   **Caching**: Redis is extensively used to cache API responses, significantly improving performance and reducing load on external APIs. Cache keys are designed to be specific to the request parameters.
+*   **External API Integration**: The application integrates with external APIs (likely MangaDex API via `dexAxios` and `coverAxios`) to fetch core manga data.
+*   **Error Handling**: Custom error classes (`BadRequestError`, `NotFoundError`) are used for consistent error responses.
+*   **Rate Limiting**: Utility functions (`passwordLimiter`, `resendLimiter`) are employed to prevent abuse of sensitive endpoints.
+*   **Image Proxies**: Dedicated proxy endpoints are provided for serving images, allowing for custom headers, caching, and CORS configurations.
+*   **Modular Design**: The API is structured into modular routers (`manga.js`, `auth.js`, `client.js`) for better organization and maintainability.
+*   **Search Functionality**: Leverages MongoDB's Atlas Search for powerful and efficient text-based searching capabilities.

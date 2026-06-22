@@ -1,0 +1,87 @@
+---
+title: "Android Foreground Services"
+description: "Implementation of background persistence and BLE connectivity via Android Foreground Services."
+sidebar_position: 31
+---
+# Android Foreground Services
+
+To ensure reliable mesh networking, MeshChat must maintain Bluetooth Low Energy (BLE) scanning and advertising capabilities even when the application is minimized or the screen is off. Because Android aggressively kills background processes to conserve battery, MeshChat implements an **Android Foreground Service**.
+
+A Foreground Service displays a non-dismissible notification to the user, signalling to the OS that the app is performing a critical task, thereby preventing the system from terminating the process.
+
+## Architecture Overview
+
+The implementation follows a bridge pattern, exposing native Android Service controls to the React Native JavaScript layer.
+
+```mermaid
+graph TD
+    A["JS Application"] -->|NativeModules.MeshForegroundService.start()| B["ForegroundServiceModule"]
+    B -->|Intent| C["MeshForegroundService"]
+    C -->|startForeground()| D["Android Notification System"]
+    D -->|Persistence| E["BLE Scanning/Advertising"]
+    C -->|START_STICKY| F["Android OS Lifecycle"]
+    F -->|Auto-Restart| C
+```
+
+## Technical Implementation
+
+### 1. The Foreground Service (`MeshForegroundService.java`)
+This is the core engine that handles the Android system requirements for background persistence.
+
+- **Persistence**: Returns `START_STICKY`, telling the Android OS to recreate the service if it is killed due to memory pressure.
+- **Notification Channel**: Implements a `NotificationChannel` (required for Android 8.0+) with `IMPORTANCE_LOW` to ensure the service runs without intrusive sound alerts.
+- **User Visibility**: Uses `setOngoing(true)` to prevent the user from swiping away the notification, ensuring the mesh node remains active.
+- **Context Switching**: The notification includes a `PendingIntent` that brings the user back to the `MainActivity` when tapped.
+
+### 2. The Native Module (`ForegroundServiceModule.java`)
+This class acts as the API gateway, allowing the React Native layer to trigger the service.
+
+- **`start()`**: Resolves a promise after invoking `startForegroundService` (for API 26+) or `startService`.
+- **`stop()`**: Allows the application to gracefully shut down the background process and remove the notification.
+
+### 3. The Package Wrapper (`ForegroundServicePackage.java`)
+Registers the `ForegroundServiceModule` into the React Native bridge during the application boot sequence.
+
+## API Usage
+
+To manage the background service from your JavaScript/TypeScript code:
+
+```javascript
+import { NativeModules } from 'react-native';
+
+const { MeshForegroundService } = NativeModules;
+
+/**
+ * Enable background BLE persistence
+ */
+async function enableBackgroundMesh() {
+  try {
+    const success = await MeshForegroundService.start();
+    if (success) {
+      console.log('MeshChat is now running in the foreground.');
+    }
+  } catch (e) {
+    console.error('Failed to start foreground service:', e);
+  }
+}
+
+/**
+ * Disable background persistence
+ */
+async function disableBackgroundMesh() {
+  try {
+    await MeshForegroundService.stop();
+    console.log('Foreground service stopped.');
+  } catch (e) {
+    console.error('Failed to stop foreground service:', e);
+  }
+}
+```
+
+## Critical Requirements
+
+For this service to function in a production environment, the following must be configured in the `AndroidManifest.xml`:
+
+1. **Permission**: `android.permission.FOREGROUND_SERVICE` must be declared.
+2. **Service Declaration**: The `MeshForegroundService` class must be registered within the `<application>` tag.
+3. **Android 14+ (API 34)**: You must specify the `foregroundServiceType` (e.g., `connectedDevice`) to comply with updated Google Play Store policies regarding background execution.

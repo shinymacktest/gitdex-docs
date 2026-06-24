@@ -1,0 +1,73 @@
+---
+title: "Core Architecture"
+description: "Deep dive into the client-side configuration, proxy settings, and global layout logic."
+sidebar_position: 2
+---
+# Core Architecture
+
+The GitDex client is built on a modern Next.js stack, utilizing **Fumadocs** for high-performance documentation rendering and **Tailwind CSS** for styling. The architecture is designed to separate request orchestration, content processing, and UI layout.
+
+## Request Orchestration
+
+The request lifecycle begins at the edge middleware. GitDex utilizes a proxy layer to enrich incoming requests before they reach the application routes.
+
+### Middleware Proxy
+The `client/proxy.ts` file implements a Next.js middleware that intercepts requests to inject critical path metadata into the request headers.
+
+```typescript
+export function proxy(request: NextRequest) {
+  const requestHeaders = new Headers(request.headers);
+  requestHeaders.set('x-pathname', request.nextUrl.pathname);
+
+  return NextResponse.next({
+    request: {
+      headers: requestHeaders,
+    },
+  });
+}
+```
+
+By setting the `x-pathname` header, the application can maintain context of the current route deeper in the server component tree without relying solely on client-side hooks. The middleware is configured to ignore static assets, API routes, and internal Next.js files to optimize performance.
+
+## Content Processing
+
+GitDex leverages `fumadocs-mdx` to transform Markdown into interactive documentation. The processing pipeline is configured in `client/source.config.ts`.
+
+### MDX Configuration
+To support complex technical diagrams, the project integrates `remarkMdxMermaid`. This allows developers to embed Mermaid.js diagrams directly within MDX files, which are then rendered as SVGs on the client side.
+
+```typescript
+export default defineConfig({
+  mdxOptions: {
+    remarkPlugins: [remarkMdxMermaid],
+  },
+});
+```
+
+## Global Layout Logic
+
+The UI shell is structured to provide a consistent experience across all generated documentation pages, managing themes, typography, and navigation.
+
+### Root Layout
+The `RootLayout` in `client/src/app/layout.tsx` serves as the top-level provider wrapper. It implements several critical layers:
+
+1.  **Typography**: Integration of `MozillaHeadline` and `MozillaText` via CSS variables for a professional technical aesthetic.
+2.  **Theming**: `ThemeProvider` manages system-aware dark/light mode switching.
+3.  **Context**: `RootProvider` initializes the Fumadocs state, controlling search behavior and documentation tree logic.
+4.  **Feedback**: A global `Toaster` component handles asynchronous notifications.
+
+### Shared Layout Options
+To maintain a DRY (Don't Repeat Yourself) approach, layout configurations are centralized in `client/src/lib/layout.shared.tsx`. The `baseOptions()` function ensures that the navigation sidebar and branding remain consistent regardless of the specific documentation section being viewed.
+
+## Architecture Flow
+
+The following diagram illustrates the flow of a request from the user through the client architecture to the final rendered output.
+
+```mermaid
+graph TD
+    A["User Request"] --> B["proxy.ts (Middleware)"]
+    B --> C["Next.js App Router"]
+    C --> D["layout.tsx (Providers)"]
+    D --> E["RootProvider / ThemeProvider"]
+    E --> F["MDX Page (Processed via source.config.ts)"]
+    F --> G["Rendered Documentation"]

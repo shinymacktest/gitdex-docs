@@ -1,92 +1,108 @@
 ---
 title: "System Architecture"
-description: "Detailed overview of the full-stack architecture, depicting the interaction between the Next.js frontend, the Node.js backend, and external AI/GitHub services. Ideal for a high-level architecture diagram."
+description: "High-level architectural overview depicting the interaction between the Next.js frontend, the Node.js backend, GitHub API, and AI providers. (Ideal for Architecture Diagram)."
 sidebar_position: 2
 ---
 # System Architecture
 
-GitDex employs a decoupled full-stack architecture consisting of a Next.js frontend, a Node.js backend deployed on Vercel, and integrations with external services for data persistence and repository management.
+GitDex is designed as a decoupled architecture consisting of a Next.js frontend and a Node.js backend. The system orchestrates the transformation of GitHub repositories into interactive documentation by integrating with the GitHub API for data retrieval and storage, and Upstash Redis for asynchronous job state management.
 
-## High-Level Architectural Overview
+## High-Level Architecture
 
-The system is designed to bridge the gap between GitHub repositories and AI-driven documentation. The architecture follows a request-response pattern where the frontend orchestrates user interactions and the backend manages the heavy lifting of repository analysis and external API coordination.
+The system follows a client-server model where the frontend serves as the presentation layer and the backend acts as the orchestration engine for indexing and documentation management.
 
 ```mermaid
 graph TD
-    C["Client (Next.js)"] -->|HTTPS Requests| B["Backend (Node.js/Express)"]
-    B -->|REST API| G["GitHub API (Octokit)"]
-    B -->|KV Store| R["Upstash Redis"]
-    B -->|Webhooks| Q["QStash"]
-    C -->|Edge Middleware| P["Proxy Layer"]
+    Client["Next.js Frontend"] -- "API Requests" --> Server["Node.js Backend"]
+    Server -- "Job State/Locks" --> Redis["Upstash Redis"]
+    Server -- "Fetch/Commit Code" --> GitHub["GitHub API"]
+    Server -- "Webhooks/Triggers" --> QStash["QStash/External"]
+    Client -- "Render Docs" --> GitHub
 ```
 
 ## Component Breakdown
 
-### Frontend Layer
-The frontend is built with Next.js and utilizes a proxy mechanism to handle request headers before they reach the application logic.
+### 1. Frontend (Next.js)
+The frontend is built using the Next.js App Router, providing a highly responsive interface for users to interact with their repository documentation. It leverages `fumadocs-ui` for the documentation framework and `next-themes` for visual customization.
 
-- **Request Proxying**: The system uses a proxy configuration to inject specific headers, such as `x-pathname`, into the request [client/proxy.ts:8-11]().
-- **Routing Constraints**: The proxy excludes internal Next.js assets, API routes, and static files from its matching logic to ensure optimal performance [client/proxy.ts:14-16]().
+**Key Responsibilities:**
+- Rendering the documentation shell via `RootProvider`.
+- Managing global application state and themes.
+- Communicating with the backend API to trigger or monitor indexing jobs.
 
-### Backend Layer
-The backend is a Node.js application using the Express framework, designed for serverless deployment.
+### 2. Backend (Node.js/Express)
+The backend is a TypeScript-based Express server deployed as a Vercel Function. It handles the business logic for repository analysis and manages the lifecycle of documentation generation.
 
-- **Server Core**: The server is initialized with Express and configured to handle CORS based on a comma-separated list of allowed client URLs [server/index.ts:14-18]().
-- **Deployment Configuration**: The backend is deployed via Vercel using the `@vercel/node` builder, with all incoming routes directed to the `index.ts` entry point [server/vercel.json:5-13]().
-- **Request Processing**: To support QStash signature verification, the server captures the raw request body before it is parsed as JSON [server/index.ts:21-25]().
+**Key Technical Implementations:**
+- **CORS Management:** Restricts access to specific authorized `CLIENT_URLS`.
+- **Payload Verification:** Implements a custom `verify` function in `express.json` to capture the `rawBody`, ensuring secure signature verification for external triggers like QStash.
+- **Developer Tooling:** Provides specialized endpoints (`/api/dev/clear`, `/api/dev/delete`) for cache invalidation and repository cleanup during development.
 
-### External Service Integration
-GitDex relies on third-party services to maintain state and interact with source code.
+### 3. State & Coordination (Upstash Redis)
+Redis is used as a distributed lock and state manager to prevent redundant processing of the same repository.
 
-- **Upstash Redis**: Used for job tracking, locking mechanisms, and cooldown management [server/index.ts:5, 37-55](). It prevents concurrent processing of the same repository and stores indexing state.
-- **GitHub API**: Utilizes the `@octokit/rest` library to interact with the GitHub platform [server/index.ts:64](). This is primarily used to read repository trees and commit changes to the documentation repository [server/index.ts:71-115]().
+**Managed Data Types:**
+- `job:*`: Tracks the progress and status of indexing tasks.
+- `lock:*`: Ensures mutual exclusion during critical processing steps.
+- `last_indexed:*`: Stores timestamps to manage indexing cooldowns.
 
-## Data Flow and Interactions
+### 4. External Integrations (GitHub API)
+GitDex treats GitHub as both a data source and a storage layer. It uses the `@octokit/rest` library to programmatically manage the documentation repository.
 
-### Repository Documentation Deletion Flow
-The backend provides administrative capabilities to wipe indexed data for specific repositories. This process involves a coordinated effort between Redis and the GitHub API.
+**GitHub API Interactions:**
+- **Tree Manipulation:** Fetches repository trees recursively to identify files for deletion or update.
+- **Git Workflow:** Performs a full Git commit cycle (Create Tree $\rightarrow$ Create Commit $\rightarrow$ Update Ref) to push generated documentation directly to the `main` branch of the docs repository.
+
+## Request Flow: Documentation Deletion
+
+The following sequence depicts the process of removing documentation for a specific repository, highlighting the interaction between the server, GitHub, and Redis.
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant C as "Client"
-    participant B as "Backend (Express)"
-    participant G as "GitHub API"
-    participant R as "Upstash Redis"
+    participant U as User
+    participant S as Backend Server
+    participant GH as GitHub API
+    participant R as Upstash Redis
 
-    C ->> B: GET /api/dev/delete?owner=X&repo=Y
-    activate B
-    B ->> G: getTree (Fetch docs path)
-    G -->> B: File list
-    B ->> G: createTree (Set files to null)
-    B ->> G: createCommit & updateRef
-    G -->> B: Success
-    B ->> R: del (job, lock, last_indexed)
-    R -->> B: Keys deleted
-    B -->> C: 200 OK (Deleted files & Redis keys)
-    deactivate B
+    U ->> S: GET /api/dev/delete?owner=X&repo=Y
+    activate S
+    S ->> GH: getTree(recursive: true)
+    GH -->> S: return file list
+    S ->> GH: getRef & getCommit (main branch)
+    GH -->> S: return SHA references
+    S ->> GH: createTree (sha: null for targets)
+    GH -->> S: return new tree SHA
+    S ->> GH: createCommit & updateRef
+    GH -->> S: commit successful
+    S ->> R: del(job:, lock:, last_indexed:)
+    R -->> S: keys cleared
+    S -->> U: 200 OK (Success Message)
+    deactivate S
 ```
 
-## API Interface
+## Infrastructure & Deployment
 
-The backend exposes several endpoints for health monitoring and development management.
+The application is optimized for serverless deployment via Vercel, as defined in the `vercel.json` configuration.
 
-| Endpoint | Method | Purpose | Source Reference |
-| :--- | :--- | :--- | :--- |
-| `/health` | `GET` | Basic service availability check | [server/index.ts:131-133]() |
-| `/api` | `ALL` | Job management routes (via `jobsRoutes`) | [server/index.ts:27]() |
-| `/api/dev/clear` | `GET` | Wipes all `job:*`, `lock:*`, and `system:*` keys from Redis | [server/index.ts:34-58]() |
-| `/api/dev/delete` | `GET` | Deletes GitHub documentation files and clears Redis state | [server/index.ts:59-128]() |
+### Deployment Specification
 
-## Configuration Summary
+| Feature | Configuration | Purpose |
+| :--- | :--- | :--- |
+| **Runtime** | `@vercel/node` | Executes the TypeScript `index.ts` as a serverless function. |
+| **Routing** | `/(.*) $\rightarrow$ index.ts` | Proxies all requests to the Express application. |
+| **Caching** | `no-store, must-revalidate` | Ensures that API responses are fresh and not cached by the edge network. |
+| **Environment** | `dotenv` | Manages secrets for `UPSTASH_REDIS_REST_TOKEN` and `GITHUB_TOKEN`. |
 
-The system's behavior is driven by environment variables and deployment manifests:
+### Core Server Implementation Snippet
+The entry point ensures that the server handles raw bodies for security and defines the primary API routing:
 
 ```typescript
-// Example of the backend's core configuration pattern
-const PORT = process.env.PORT || 3001;
-const clientUrls = (process.env.CLIENT_URLS || 'http://localhost:3000')
-    .split(',')
-    .map(url => url.trim());
-```
-[server/index.ts:10-14]()
+// server/index.ts
+app.use(express.json({
+    verify: (req: any, res, buf) => {
+        req.rawBody = buf.toString();
+    }
+}));
+
+app.use("/api", jobsRoutes);

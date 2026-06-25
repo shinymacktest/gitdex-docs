@@ -1,91 +1,103 @@
 ---
 title: "Deployment & Configuration"
-description: "Guide to the project's configuration files, package dependencies, and Vercel deployment settings."
+description: "Guide to environment variables, Vercel deployment settings, and source configuration."
 sidebar_position: 10
 ---
 # Deployment & Configuration
 
-GitDex utilizes a decoupled architecture consisting of a Next.js frontend (client) and a Node.js/Bun backend (server). This page details the configuration, dependencies, and deployment strategies for both environments.
+This guide provides the technical specifications for deploying the GitDex server and configuring the client-side documentation engine.
 
-## Server Configuration
+## Server Deployment
 
-The server is designed as a high-performance API handling AI orchestration and indexing jobs.
+The GitDex server is designed for serverless deployment on Vercel, utilizing a single-entry point architecture to handle all incoming API requests.
 
-### Runtime and Execution
-The server is developed and executed using the Bun runtime, which provides native TypeScript support and high-performance I/O [server/package.json:13-16](). 
+### Vercel Configuration
 
-| Script | Command | Description |
+The deployment is managed via the `server/vercel.json` file, which maps all incoming traffic to the main server logic.
+
+| Configuration Key | Value | Description |
 | :--- | :--- | :--- |
-| `npm start` | `bun index.ts` | Starts the production server [server/package.json:14]() |
-| `npm run dev` | `bun --watch index.ts` | Starts server in watch mode for development [server/package.json:15]() |
+| `builds[0].src` | `index.ts` | The entry point for the serverless function. |
+| `builds[0].use` | `@vercel/node` | The Vercel runtime builder used for Node.js/TypeScript. |
+| `routes[0].src` | `/(.*)` | A wildcard regex that captures all incoming request paths. |
+| `routes[0].dest` | `index.ts` | Routes all captured paths to the main server handler. |
 
-### Technical Stack & Dependencies
-The server relies on a specialized set of libraries for AI processing and data persistence [server/package.json:18-27]():
+### Request Handling & Caching
+To ensure that AI-generated responses and job status updates are always current, the server explicitly disables caching for all routes:
+- **Header**: `Cache-Control: no-store, must-revalidate`
 
-- **AI Orchestration**: `@ai-sdk/google`, `@google/genai`, and the `ai` SDK [server/package.json:18-20]().
-- **Infrastructure**: `@upstash/qstash` for queue management and `@upstash/redis` / `ioredis` for caching and state [server/package.json:21-22, 25]().
-- **API Framework**: `express` (v5.2.1) [server/package.json:23]().
-- **GitHub Integration**: `@octokit/rest` for repository data fetching [server/package.json:20]().
+## Environment Configuration
 
-### TypeScript Configuration
-The server uses a strict TypeScript configuration optimized for modern ESNext environments [server/tsconfig.json:3-16](). Key settings include:
-- **Target/Lib**: `ESNext` [server/tsconfig.json:3-4]().
-- **Module Resolution**: `bundler` with `Preserve` module type [server/tsconfig.json:5, 8]().
-- **Strictness**: `strict: true` and `noUncheckedIndexedAccess: true` to ensure type safety [server/tsconfig.json:12, 15]().
+Based on the server's dependency tree in `package.json`, the following external integrations must be configured via environment variables (managed via `dotenv` in development).
 
-## Client Configuration
+### Required Integration Keys
 
-The client is a Next.js application focused on providing a rich, interactive UI for AI-driven repository analysis.
-
-### Framework and Build Process
-The client uses Next.js (v16.2.9) and leverages Turbopack for optimized development and build cycles [client/package.json:7-8, 56]().
-
-### Core Dependencies
-The frontend is divided into several functional layers [client/package.json:12-65]():
-
-#### AI and Chat Interface
-The interface is powered by the `assistant-ui` ecosystem, providing a modular approach to chat threads and markdown rendering [client/package.json:13-16](). It integrates with the `ai` SDK for streaming responses [client/package.json:19]().
-
-#### Documentation and Rendering
-GitDex uses a sophisticated pipeline for rendering technical content:
-- **MDX Processing**: `fumadocs` and `next-mdx-remote` for documentation [client/package.json:17-18, 32, 46]().
-- **Mathematics & Diagrams**: `katex`, `rehype-katex`, and `mermaid` for rendering complex technical diagrams and formulas [client/package.json:35, 41, 48-49]().
-- **Search**: `flexsearch` and `fuse.js` for client-side indexing and retrieval [client/package.json:29-30]().
-
-#### UI and Visualization
-- **Styling**: Tailwind CSS (v4.3.1) with `tailwindcss-animate` [client/package.json:67-68]().
-- **Components**: Radix UI primitives and Shadcn UI [client/package.json:21-26, 27]().
-- **3D/Interactive Elements**: `three.js`, `ogl`, and `panzoom` for the interactive repository constellation [client/package.json:54-55, 44-45]().
-
-## Deployment Settings
-
-### Vercel Integration
-The server is configured for deployment on Vercel using a `vercel.json` configuration file [server/vercel.json:1-16]().
-
-#### Build and Routing Configuration
-The deployment is defined as follows:
-- **Build**: The entry point `index.ts` is processed using the `@vercel/node` builder [server/vercel.json:3-6]().
-- **Routing**: A catch-all route redirects all incoming traffic to `index.ts` [server/vercel.json:9-11]().
-- **Caching**: Headers are explicitly set to `no-store, must-revalidate` to prevent the caching of dynamic AI responses [server/vercel.json:12-14]().
+| Service | Dependency | Purpose | Expected Variable (Example) |
+| :--- | :--- | :--- | :--- |
+| **Google AI** | `@google/genai` | LLM processing and content generation | `GOOGLE_GENAI_API_KEY` |
+| **GitHub** | `@octokit/rest` | Repository data fetching and analysis | `GITHUB_TOKEN` |
+| **Upstash Redis** | `@upstash/redis` | Fast state storage and caching | `UPSTASH_REDIS_REST_URL` |
+| **Upstash QStash** | `@upstash/qstash` | Asynchronous job scheduling | `QSTASH_TOKEN` |
 
 ### Deployment Workflow
 
 ```mermaid
-graph TD
-    A["Source Code"] --> B["Vercel Build Pipeline"]
-    B --> C["@vercel/node Builder"]
-    C --> D["index.ts (Server Entry)"]
-    D --> E["Production API Endpoint"]
-    E --> F["Client Request"]
-    F --> G["vercel.json Routing"]
-    G --> D
+graph LR
+    A["Client Request"] --> B["Vercel Gateway"]
+    B --> C["index.ts (Express)"]
+    C --> D["Upstash Redis"]
+    C --> E["Google AI SDK"]
+    C --> F["GitHub API"]
+    D --> G["State/Cache"]
+    E --> H["AI Response"]
+    F --> I["Repo Data"]
 ```
 
-## Summary of Project Configuration
+## Client Documentation Configuration
 
-| Component | Runtime/Framework | Key Configuration File | Primary Goal |
-| :--- | :--- | :--- | :--- |
-| **Server** | Bun / Express | `server/package.json` | AI Logic & Indexing [server/package.json:1-27]() |
-| **Client** | Next.js / React | `client/package.json` | User Interface & Docs [client/package.json:1-68]() |
-| **Infrastructure** | Vercel | `server/vercel.json` | Serverless Deployment [server/vercel.json:1-16]() |
-| **Types** | TypeScript | `server/tsconfig.json` | Type Safety [server/tsconfig.json:1-17]() |
+The frontend utilizes `fumadocs-mdx` for rendering its technical documentation. The configuration is centralized in `client/source.config.ts`.
+
+### MDX Plugin Integration
+The documentation engine is configured to support complex technical diagrams through the `remarkMdxMermaid` plugin.
+
+```typescript
+// Extracted from client/source.config.ts
+export default defineConfig({
+  mdxOptions: {
+    remarkPlugins: [remarkMdxMermaid],
+  },
+});
+```
+
+This configuration allows the documentation to render Mermaid.js diagrams directly from Markdown source files, enabling the visualization of the project's complex architectural flows.
+
+## Runtime & Build System
+
+The project leverages the **Bun** runtime for optimized performance and development speed.
+
+### Execution Scripts
+As defined in `server/package.json`, the following scripts are used for lifecycle management:
+
+- `bun dev`: Starts the server in watch mode using `bun --watch index.ts`.
+- `bun start`: Executes the production server using `bun index.ts`.
+
+### Dependency Architecture
+The server employs a modern asynchronous stack to handle high-latency AI and API calls:
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant C as "Client"
+    participant S as "Express Server"
+    participant Q as "QStash/Redis"
+    participant AI as "Google GenAI"
+
+    C ->>+ S: Request Analysis
+    S ->>+ Q: Queue Job
+    Q -->>- S: Job ID
+    S -->>- C: 202 Accepted (JobID)
+    
+    Note over Q, AI: Background Processing
+    Q ->>+ AI: Process Codebase
+    AI -->>- Q: Indexed Result
+    Q ->> Q: Store in Redis

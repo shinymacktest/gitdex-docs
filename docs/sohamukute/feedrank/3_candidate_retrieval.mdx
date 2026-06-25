@@ -1,89 +1,78 @@
 ---
 title: "Candidate Retrieval"
-description: "Implementation of various retrieval strategies including ALS, popularity-based, and cold-start mechanisms."
+description: "Implementation of retrieval strategies to narrow down the item pool, including ALS, popularity-based, and cold-start logic."
 sidebar_position: 3
 ---
 # Candidate Retrieval
 
-The Candidate Retrieval layer is the first stage of the `feedrank` recommendation pipeline. Its primary goal is to efficiently narrow down the entire item catalog (millions of items) to a small set of high-potential candidates (hundreds) that are then passed to the ranking stage.
+The Candidate Retrieval stage is the first phase of the `feedrank` recommendation pipeline. Its primary objective is to efficiently narrow down the entire item universe (potentially millions of items) into a manageable pool of a few hundred high-quality candidates for the subsequent ranking stage.
 
-## Retrieval Architecture
+## Overview
 
-The system employs a hybrid retrieval strategy that routes users based on their interaction history to ensure both personalization for active users and discovery for new users.
+`feedrank` employs a multi-strategy retrieval approach to balance personalization, serendipity, and the "cold start" problem. Depending on the user's history, the system routes them to different retrieval engines.
 
 ```mermaid
 graph TD
-    User["User Request"] --> Router{"User Router"}
-    Router -- "Cold Start" --> PopRet["Popularity Retrieval"]
-    Router -- "Warm/Hot" --> Hybrid["Hybrid Retrieval"]
-    Hybrid --> ALS["ALS (Collaborative Filtering)"]
-    Hybrid --> AB["Also Bought (Graph)"]
-    PopRet --> Diver["Category Diversifier"]
-    ALS --> Merge["Candidate Merger"]
-    AB --> Merge
-    Diver --> Merge
-    Merge --> Rank["Ranking Stage"]
+    A["User Request"] --> B{"User History?"}
+    B -- "Below Threshold" --> C["Cold Start Route"]
+    B -- "Above Threshold" --> D["Warm Start Route"]
+    C --> E["Popularity-based Retrieval"]
+    D --> F["Collaborative Filtering (ALS)"]
+    D --> G["Co-purchase Graph (Also Bought)"]
+    E --> H["Candidate Pool"]
+    F --> H
+    G --> H
 ```
 
 ## Retrieval Strategies
 
 ### 1. Collaborative Filtering (ALS)
-Implemented in `src/retrieval/als.py`, the system uses **Alternating Least Squares (ALS)** to learn latent factors for users and items.
+The system uses **Alternating Least Squares (ALS)** to learn latent factors for users and items. This captures implicit preferences based on interaction history.
 
-- **Training**: The `train_als()` function builds a sparse interaction matrix from training data and fits the `implicit.als.AlternatingLeastSquares` model.
-- **Indexing**: To enable sub-millisecond retrieval, item factors are normalized and loaded into a **Faiss** `IndexFlatIP` (Inner Product) index. Because factors are normalized, the inner product effectively computes **Cosine Similarity**.
-- **Retrieval**: `retrieve_als(user_id, n)` looks up the user's latent vector and performs an Approximate Nearest Neighbor (ANN) search against the Faiss index.
+- **Training**: The `train_als()` function builds a sparse interaction matrix and decomposes it into user and item factors.
+- **Fast Retrieval**: To avoid linear scans, item factors are indexed using **FAISS (Facebook AI Similarity Search)**. 
+- **Similarity**: Factors are normalized to unit length, transforming the Inner Product search (`IndexFlatIP`) into **Cosine Similarity**.
+- **Cold Start Handling**: Users not present in the training set are identified as cold-start users and bypass ALS retrieval to avoid empty results.
 
 ### 2. Co-purchase Graph (Also Bought)
-Implemented in `src/retrieval/also_bought.py`, this strategy leverages item-to-item relationships derived from Amazon's `bought_together` metadata.
+To complement latent factors with explicit item-to-item relationships, `feedrank` implements a graph-based retrieval strategy.
 
-- **Mechanism**: It builds a graph where nodes are items and edges represent "bought together" signals.
-- **Retrieval**: Given a set of items in the current user session, `retrieve_also_bought` finds all items linked to those session items.
-- **Scoring**: Candidates are scored by **frequency**—the more session items that point to a specific candidate, the higher its score. This provides a strong "cross-category discovery" signal.
+- **Logic**: It leverages metadata (e.g., `bought_together`) to identify items frequently purchased with the user's current session items.
+- **Scoring**: Candidates are scored based on frequency—the more session items that point to a candidate, the higher its score.
+- **Discovery**: This strategy is particularly effective for cross-category discovery and session-based recommendations.
 
 ### 3. Popularity-based Retrieval
-Implemented in `src/retrieval/popularity.py`, this serves as a baseline and a fallback for cold-start scenarios.
+For users with no history or as a fallback, the system retrieves globally and category-specifically popular items.
 
-- **Scoring Formula**:
-  The system calculates a popularity score that balances volume, quality, and freshness:
-  $$\text{Score} = \frac{\text{Interaction Count} \times \text{Avg Rating}}{\log(1 + \text{Item Age in Days})}$$
-- **Storage**: Scores are precomputed and stored in `popularity_global.json` and `popularity_by_category.json` for $O(1)$ lookup.
+- **Popularity Score**: A custom heuristic is used to calculate item popularity:
+  $$\text{Score} = \frac{\text{Interaction Count} \times \text{Average Rating}}{\log(1 + \text{Item Age in Days})}$$
+- **Age Decay**: The logarithmic penalty on item age ensures that the feed remains fresh and prevents old "blockbuster" items from dominating indefinitely.
+- **Category Tiers**: Popularity is precomputed both globally and per-category to allow for targeted fallback feeds.
 
 ## Cold Start Logic
 
-The `src/retrieval/cold_start.py` module handles users with insufficient history to generate personalized embeddings.
+The `cold_start.py` module manages the routing of users based on their interaction count.
 
-### User Routing
-The `route_user` function determines if a user is "cold" based on the `min_history` configuration. 
-- **Cold**: Users with interactions $< \text{min\_history}$.
-- **Warm/Hot**: Users with sufficient data for ALS retrieval.
-
-### Diversified Cold Start Feed
-To avoid showing only the most generic items, `cold_start_feed` implements a **category-capping mechanism**:
-1. It pulls a large pool of popular items.
-2. It applies a `max_per_category` limit to ensure the feed contains a diverse set of product categories.
-3. If the target count $n$ is not met, it relaxes the cap to ensure a full feed.
+1. **Routing**: The `route_user()` function checks if a user's history is below the `min_history` threshold defined in the config.
+2. **Diversified Feed**: For cold-start users, `cold_start_feed()` retrieves popular items but applies a **Category Cap**. This prevents the feed from being saturated by a single dominant category, ensuring the user is exposed to a diverse set of offerings to help the system learn their preferences faster.
 
 ## Evaluation
 
-The retrieval quality is measured using **Recall@K** via `evaluate_retrieval`. The system segments performance by user "temperature" to track how well different strategies perform:
+Retrieval quality is measured using **Recall@K**. The `evaluate_retrieval()` function assesses how many of the actual items a user interacted with in the test set were successfully captured in the top $K$ retrieved candidates.
 
-| Bucket | Definition | Primary Strategy |
+Performance is bucketed by user history length:
+- **Cold**: < 5 interactions.
+- **Warm**: 5–20 interactions.
+- **Hot**: > 20 interactions.
+
+This granularity allows developers to identify if retrieval failures are systemic or specific to new users.
+
+## Implementation Details
+
+| Component | Technology | Primary File |
 | :--- | :--- | :--- |
-| **Cold** | $< 5$ interactions | Popularity Diversified |
-| **Warm** | $5 - 20$ interactions | Hybrid (ALS + Graph) |
-| **Hot** | $> 20$ interactions | Hybrid (ALS + Graph) |
-
-## Configuration
-
-Relevant settings in `config.yaml`:
-
-```yaml
-als:
-  factors: 64          # Latent dimensions
-  iterations: 15       # Training epochs
-  regularization: 0.01  # Lambda regularization
-
-cold_start:
-  min_history: 5       # Threshold to be considered "warm"
-  max_per_category: 2  # Diversity cap for cold-start feed
+| Latent Factors | `implicit` (ALS) | `src/retrieval/als.py` |
+| ANN Search | `faiss` | `src/retrieval/als.py` |
+| Data Structures | `scipy.sparse.csr_matrix` | `src/retrieval/als.py` |
+| Graph Store | Python Dictionary | `src/retrieval/also_bought.py` |
+| Popularity | `pandas` / JSON | `src/retrieval/popularity.py` |

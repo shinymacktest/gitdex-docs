@@ -1,92 +1,89 @@
 ---
-title: "Serving Infrastructure"
-description: "Deployment logic, API implementation, caching strategies, and latency timing."
+title: "Serving & Infrastructure"
+description: "The production serving layer, covering the API application, caching strategies, and fallback mechanisms."
 sidebar_position: 6
 ---
-# Serving Infrastructure
+# Serving & Infrastructure
 
-The serving layer of `feedrank` is a high-performance FastAPI implementation designed to deliver personalized recommendations with strict latency guarantees. It employs a tiered retrieval-and-ranking architecture, integrating multiple candidate generation sources with a fallback mechanism to ensure high availability.
+The serving layer of `feedrank` is a high-performance API designed to deliver personalized item recommendations with strict latency guarantees. It implements a multi-stage pipeline (Retrieval $\rightarrow$ Ranking $\rightarrow$ Re-ranking) with integrated fallback mechanisms to ensure availability even during system degradation or for cold-start users.
 
-## Request Flow
+## System Architecture
 
-The serving pipeline routes users based on their history and applies a multi-stage process to generate the final feed.
+The serving layer is built on **FastAPI** and utilizes **Redis** for low-latency caching of embeddings and pre-computed feeds.
 
 ```mermaid
 graph TD
     A["User Request"] --> B["FastAPI /recommend"]
-    B --> C{"Route User"}
-    C -- "Cold Start" --> D["Cold Start Feed (Popularity)"]
-    C -- "Warm Start" --> E["Retrieval (ALS + Also Bought)"]
-    E --> F{"SLA Check"}
-    F -- "Exceeded Abort SLA" --> G["Fallback Engine"]
-    F -- "Within SLA" --> H["LGBM Ranker"]
-    H --> I["Constraints Pipeline"]
-    I --> J{"SLA Check"}
-    J -- "Exceeded Abort SLA" --> G
-    J -- "Within SLA" --> K["Final Feed"]
-    G --> K
+    B --> C{"User Router"}
+    C -- "Cold Start" --> D["Popularity Retrieval"]
+    C -- "Warm Start" --> E["Hybrid Retrieval (ALS + Also Bought)"]
+    E --> F{"SLA Check 1"}
+    F -- "Timeout" --> G["Fallback Logic"]
+    F -- "OK" --> H["LGBM Ranker"]
+    H --> I{"SLA Check 2"}
+    I -- "Timeout" --> G
+    I -- "OK" --> J["Constraint Application"]
+    J --> K["Final Formatting"]
     D --> K
-    K --> L["Async Cache & Response"]
+    G --> K
+    K --> L["Async Cache Update"]
+    L --> M["Response"]
 ```
 
-## API Implementation
+## The Recommendation Lifecycle
 
-### `/recommend`
-The primary endpoint for generating personalized item feeds.
+### 1. User Routing
+Every request is first routed based on the user's historical activity:
+- **Cold Path**: Users with insufficient history are routed to the `cold_start_feed`, which provides a diverse set of popular items.
+- **Warm Path**: Users with known history enter the full retrieval and ranking pipeline.
 
-**Request Schema:**
-- `user_id` (str): Unique identifier for the user.
-- `session_items` (list, optional): Items currently in the user's session for real-time context.
-- `n` (int, default=10): Number of recommendations to return.
+### 2. Warm Path Execution
+For warm users, the system follows a sophisticated pipeline to balance precision and latency:
 
-**Processing Logic:**
-1. **Routing**: Users are categorized as `cold` or `warm` based on their interaction history.
-2. **Retrieval (Warm Path)**: 
-   - Fetches candidates from Collaborative Filtering (`ALS`) and graph-based `Also Bought` logic.
-   - Candidates are merged and deduplicated, prioritizing ALS scores.
-3. **Ranking**: 
-   - Valid candidates are transformed into a feature dataframe.
-   - The LGBM ranker predicts the probability of interaction.
-4. **Post-processing**: 
-   - Applies business constraints (Seller Diversity, Price Band, Freshness).
-5. **SLA Enforcement**: The system checks elapsed time against `abort_sla_ms` at critical junctions. If exceeded, it bypasses remaining steps and triggers the fallback engine.
+1.  **Hybrid Retrieval**: Candidates are fetched from two sources:
+    - **ALS (Alternating Least Squares)**: Collaborative filtering for user-item affinity.
+    - **Also Bought**: Graph-based retrieval based on the current session's items.
+2.  **Deduplication**: Candidates are merged, prioritizing ALS results.
+3.  **ML Ranking**: The merged candidates are passed through a LightGBM model (`predict`) which scores items based on real-time features.
+4.  **Business Constraints**: The `apply_constraints` module ensures the final list meets production requirements:
+    - **Seller Diversity**: Prevents a single seller from dominating the feed.
+    - **Price Band**: Filters items based on the user's average spend.
+    - **Freshness**: Prioritizes newer items.
 
-### `/health` & `/metrics`
-- **`/health`**: Reports API status, Redis connectivity, and model loading state.
-- **`/metrics`**: Returns rolling latency statistics (P50, P95, P99, Mean) calculated via the `LatencyMiddleware`.
+### 3. SLA & Circuit Breaking
+To prevent API timeouts, the system implements "Abort SLAs." At critical junctions (post-retrieval and post-ranking), the system checks the elapsed time:
+- **`total_sla_ms`**: Triggers a warning log if exceeded.
+- **`abort_sla_ms`**: If reached, the system immediately terminates the pipeline and serves a fallback feed to ensure the user receives a response.
 
 ## Caching Strategy
 
-To minimize latency and reduce load on the ranker, `feedrank` utilizes Redis for three primary purposes:
+The infrastructure uses Redis as a sidecar for state management and latency reduction.
 
-| Cache Type | Key Pattern | Description | Strategy |
-| :--- | :--- | :--- | :--- |
-| **Embeddings** | `user_emb:{uid}` | Stores NumPy arrays of user latent vectors. | Binary serialization via `io.BytesIO` |
-| **Feeds** | `feed:{uid}` | Stores the final ranked item list. | JSON serialization |
-| **Stats** | `hist_count:{uid}` | Stores user interaction counts for routing. | Integer value |
+| Cache Key | Content | Purpose |
+| :--- | :--- | :--- |
+| `user_emb:{id}` | Numpy Array | Stores pre-computed user embeddings for fast retrieval. |
+| `feed:{id}` | JSON List | Stores the last successfully generated feed for rapid fallback. |
+| `hist_count:{id}` | Integer | Tracks user activity levels for routing. |
 
-**Async Caching**: To avoid blocking the HTTP response, the final feed is cached asynchronously using `asyncio.create_task` after the response is prepared.
+**Reliability Note**: The cache layer is designed for **graceful degradation**. All Redis calls are wrapped in try-except blocks; if the Redis cluster is unavailable, the system logs a warning and continues serving via the primary pipeline or global popularity fallback.
 
-## Fallback Mechanism
+## Fallback Mechanisms
 
-When a request fails to produce candidates or exceeds the `abort_sla_ms`, the `get_fallback_feed` logic is triggered:
+If the primary pipeline fails (no candidates found) or is aborted due to SLA breaches, the `get_fallback_feed` logic triggers a tiered recovery:
 
-1. **Cached Feed**: The system first attempts to retrieve a previously generated feed for the user from Redis.
-2. **Global Popularity**: If no cache exists, it returns a globally popular item set to ensure the user never sees an empty screen.
+1.  **Tier 1 (User Cache)**: Attempts to retrieve the most recent successfully generated feed for that specific user from Redis.
+2.  **Tier 2 (Global Popularity)**: If no user cache exists, it returns a globally popular item list to ensure the UI is never empty.
 
-## Latency & Timing
+## Infrastructure Monitoring
 
-The infrastructure implements a `LatencyMiddleware` that tracks every request's duration.
+### Latency Tracking
+A custom `LatencyMiddleware` wraps every request, maintaining a rolling buffer of the last 1,000 requests. This allows the `/metrics` endpoint to provide real-time performance telemetry:
+- **P50**: Median response time.
+- **P95/P99**: Tail latency monitoring to identify bottlenecks.
+- **Mean**: Average throughput performance.
 
-- **Monitoring**: A rolling buffer of the last 1,000 requests is maintained in memory.
-- **SLA Tiers**:
-    - `total_sla_ms`: Threshold for warning logs.
-    - `abort_sla_ms`: Hard limit that triggers the fallback mechanism to prevent request timeouts.
-
-## Deployment Configuration
-
-The serving layer loads critical artifacts during the FastAPI `lifespan` event to ensure zero-latency overhead during the first request:
-- Item metadata (`items.parquet`) loaded into a dictionary for $O(1)$ lookup.
-- Precomputed user average spend and global median prices.
-- ALS Faiss indices and Popularity maps.
-- Item category mappings for diversity constraints.
+### Health Checks
+The `/health` endpoint provides a heartbeat for three critical components:
+- **API Status**: Basic service availability.
+- **Redis Connectivity**: Validates the cache layer via `ping()`.
+- **Model Readiness**: Confirms that all Parquet artifacts and ML models were successfully loaded into memory during the `lifespan` startup.

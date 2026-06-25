@@ -1,79 +1,88 @@
 ---
-title: "Ranking and Reranking"
-description: "The two-stage process of scoring candidates and applying business constraints for final ordering."
+title: "Ranking & Reranking"
+description: "The scoring mechanism for candidate items and the subsequent reranking pipeline to apply business constraints."
 sidebar_position: 4
 ---
-# Ranking and Reranking
+# Ranking & Reranking
 
-FeedRank employs a two-stage architecture to transform a broad set of retrieved candidates into a precision-ordered final feed. This process separates the **ML-driven scoring** (Ranking) from the **business logic and UX constraints** (Reranking).
+The Ranking and Reranking stage transforms a coarse list of candidate items retrieved from the ALS model into a high-precision, business-aligned feed. FeedRank employs a two-stage architecture: a machine-learning-based **Ranker** for relevance scoring and a **Reranking Pipeline** for applying business constraints.
 
 ## System Architecture
 
-The transition from candidate retrieval to final delivery follows a strict pipeline to ensure both relevance and diversity.
+The transition from retrieval to the final output follows a linear pipeline designed to balance latency with recommendation quality.
 
 ```mermaid
 graph TD
-    A["Retrieved Candidates (ALS/Popularity)"] --> B["Feature Engineering (O(1) Lookups)"]
-    B --> C["LightGBM Ranker (ML Scoring)"]
-    C --> D["Seller Diversity Constraint"]
-    D --> E["Price Band Filtering"]
-    E --> F["Freshness Boosting"]
-    F --> G["Final Top-K Feed"]
+    A["Candidate Retrieval (ALS/Popularity)"] --> B["Feature Engineering"]
+    B --> C["LGBM Ranker (Scoring)"]
+    C --> D["Reranking Pipeline (Constraints)"]
+    D --> E["Final Ranked Feed (Top-K)"]
 ```
 
-## Stage 1: Ranking (ML Scoring)
+## Stage 1: ML Ranking
 
-The Ranking stage uses a Gradient Boosted Decision Tree (GBDT) model implemented via LightGBM to predict the probability of interaction for each candidate.
-
-### The Model
-The ranker is trained as a regressor to optimize **nDCG (Normalized Discounted Cumulative Gain)**. By treating ranking as a regression problem on interaction signals, the system can precisely order candidates based on predicted relevance.
+The ranker uses a Gradient Boosted Decision Tree (LightGBM) to predict the probability of interaction based on user and item features.
 
 ### Feature Engineering
-To maintain low latency during inference, features are built using $O(1)$ dictionary lookups rather than expensive joins. Key feature groups include:
+The model utilizes a specific set of features to score candidates. To ensure high performance, features are precomputed in lookups for $O(1)$ access during inference.
 
-| Feature | Description | Purpose |
+| Feature | Description | Logic/Notes |
 | :--- | :--- | :--- |
-| `user_avg_spend` | User's historical mean spend | Personalization of price sensitivity |
-| `price_band_match` | Proximity of item price to user average | Relevance filtering |
-| `review_quality` | $\text{rating} \times \log(1 + \text{count})$ | Quality signal weighting |
-| `brand_affinity` | User's preference for specific brands | Brand loyalty signal |
-| `session_position` | The position of the item during training | **Position Bias Mitigation** |
+| `user_avg_spend` | User's historical average purchase price. | Defaults to global median if unknown. |
+| `price_band_match` | Similarity between item price and user's average spend. | Computed via a tolerance-based decay function. |
+| `review_quality` | Combined signal of rating and volume. | $\text{rating} \times \log(1 + \text{rating\_number})$. |
+| `brand_affinity` | User's historical preference for the brand. | Binary or count-based signal. |
+| `category_match` | Alignment between item category and user interests. | Binary signal. |
+| `session_position` | Position of the item during training. | **Training only**: Used to neutralize position bias. |
 
 ### Handling Position Bias
-A critical challenge in ranking is that users are more likely to click the first few items regardless of relevance. FeedRank addresses this by:
-1. Including `session_position` as a feature during **training**, allowing the model to learn the effect of position.
-2. Setting `session_position` to `0` during **inference**, effectively neutralizing the bias and ranking items solely on their intrinsic relevance.
+To prevent the model from simply learning that "items at the top are clicked more," `session_position` is included during training. At inference time, this value is set to `0` (neutralized), forcing the model to rank items based on intrinsic relevance rather than their previous display position.
 
-## Stage 2: Reranking (Business Constraints)
+### Inference Performance
+The `predict` function is optimized for low-latency serving:
+- **Type Casting**: Features are cast to `np.float32` to optimize LGBM inference.
+- **Fallback**: If required features are missing from the candidate dataframe, they are zero-filled to prevent runtime crashes.
+- **Latency Monitoring**: A warning is logged if inference exceeds 20ms.
 
-After the ML model generates raw scores, the Reranking pipeline applies heuristic constraints to ensure a healthy user experience. Constraints are applied in a specific priority order.
+## Stage 2: Reranking Pipeline
 
-### 1. Seller Diversity
-To prevent the feed from being dominated by a single brand or seller, the `seller_diversity` function limits the number of items per seller.
-- **Logic**: Items exceeding the `max_per_seller` threshold are pushed to the end of the list rather than deleted.
-- **Trade-off**: Testing indicated that `max_per_seller = 2` provides the best balance, increasing basket diversity by 12% with minimal nDCG loss.
+After the LGBM ranker produces raw scores, the Reranking Pipeline applies business constraints to ensure the feed is diverse, affordable, and fresh.
 
-### 2. Price Band Filtering
-Instead of hard-filtering items outside a user's budget, FeedRank uses a penalty system.
-- **Logic**: Items whose price deviates from the `user_avg_spend` beyond a specific tolerance (e.g., 30%) have their scores multiplied by a penalty factor (0.6).
-- **Rationale**: Hard filters are too aggressive; users occasionally purchase "splurge" items. Penalization lowers their rank while keeping them discoverable.
+### Constraint Implementation
 
-### 3. Freshness Boosting
-To ensure the feed remains novel, newly listed items receive a score boost.
-- **Logic**: Items listed within a defined window (e.g., 30 days) receive a multiplicative boost (e.g., 15%).
+The pipeline applies constraints in a strict priority order: **Seller Diversity $\rightarrow$ Price Band $\rightarrow$ Freshness**.
 
-## Evaluation and Benchmarking
+#### 1. Seller Diversity
+Prevents a single brand or seller from dominating the feed.
+- **Logic**: Limits items per seller to a maximum (default: 2).
+- **Behavior**: Excess items are not deleted but moved to the end of the list to maintain recall.
+- **Trade-off**: Testing indicates that `max_per_seller=2` provides the best balance between NDCG and basket diversity.
 
-The system's efficacy is validated through three experimental tiers, tracked via MLflow:
+#### 2. Price Band Filter
+Ensures recommended items are within a reasonable price range for the user.
+- **Logic**: If the price difference exceeds the `price_band_tolerance`, the score is penalized (multiplied by 0.6).
+- **Behavior**: Items are penalized rather than removed. This allows "aspirational" purchases (e.g., a high-ticket item for a birthday) to remain in the list but at a lower rank.
 
-1. **Popularity Baseline**: A non-personalized list of globally popular items.
-2. **ALS Only**: Collaborative filtering retrieval scores used directly for ranking.
-3. **ALS + LightGBM**: The full two-stage pipeline.
+#### 3. Freshness Boost
+Increases the visibility of newly listed items to encourage discovery.
+- **Logic**: Items listed within the `freshness_days` window receive a score boost (default: +15%).
 
-### Performance Metrics
-The pipeline is evaluated using the following KPIs:
-- **nDCG@10**: Measures the ranking quality of the top 10 items.
-- **Recall@50**: Measures the percentage of relevant items captured in the top 50.
-- **Hit Rate@5**: Binary measure of whether at least one relevant item appears in the top 5.
-- **p99 Latency**: Ensures the end-to-end scoring and reranking process stays within production SLA (typically < 20ms for the `predict` call).
-- **Coverage**: The number of unique items recommended across all users, measuring the system's ability to avoid "popularity bias."
+## Experimental Validation
+
+The effectiveness of this pipeline is validated against two baselines using MLflow for tracking.
+
+### Evaluation Metrics
+- **NDCG@10**: Normalized Discounted Cumulative Gain (measures ranking quality).
+- **Recall@50**: Proportion of actual interactions captured in the top 50.
+- **Hit Rate@5**: Binary indicator of whether at least one relevant item is in the top 5.
+- **Coverage**: The number of unique items recommended across all users.
+- **p99 Latency**: The 99th percentile of the end-to-end ranking time.
+
+### Comparison Summary
+Typical experiment results demonstrate the lift provided by the two-stage approach:
+
+| Approach | NDCG@10 | Recall@50 | p99 Latency | Coverage |
+| :--- | :--- | :--- | :--- | :--- |
+| Popularity Baseline | Low | Low | Lowest | Lowest |
+| ALS Only | Medium | Medium | Low | Medium |
+| **ALS + LGBM** | **Highest** | **Highest** | **Medium** | **Highest** |

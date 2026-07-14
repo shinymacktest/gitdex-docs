@@ -1,0 +1,92 @@
+---
+title: "API Gateway"
+description: "Explanation of the request routing, rate limiting, and centralized filtering logic. Ideal for a request-response flow diagram."
+sidebar_position: 5
+---
+# API Gateway
+
+The API Gateway serves as the single entry point for all client requests to the DaakDash system. It is responsible for routing requests to the appropriate microservices, enforcing rate limits to prevent abuse, and managing centralized configuration.
+
+## Request Routing
+
+The Gateway utilizes Spring Cloud Gateway to route incoming HTTP requests based on path predicates to downstream services.
+
+### Routing Table
+
+| Route ID | Path Predicate | Target Service | Target URI | Rate Limited |
+| :--- | :--- | :--- | :--- | :--- |
+| `auth` | `/api/auth/**` | Auth Service | `http://auth:8081` | Yes |
+| `admin-sellers` | `/api/admin/sellers` | Auth Service | `http://auth:8081` | No |
+| `parcels` | `/api/parcels/**` | Tracking Service | `http://tracking:8082` | No |
+| `depot` | `/api/depot/**` | Tracking Service | `http://tracking:8082` | No |
+| `depots` | `/api/depots/**` | Tracking Service | `http://tracking:8082` | No |
+| `partner` | `/api/partner/**` | Tracking Service | `http://tracking:8082` | No |
+| `admin` | `/api/admin/**` | Tracking Service | `http://tracking:8082` | No |
+| `track` | `/api/track/**` | Tracking Service | `http://tracking:8082` | Yes |
+
+## Request Flow
+
+The following diagram illustrates the lifecycle of a request as it passes through the API Gateway.
+
+```mermaid
+graph LR
+    A["Client"] ->> B["API Gateway (8080)"]
+    B ->> C{"Route Match?"}
+    C -- "Yes" --> D{"Rate Limit?"}
+    C -- "No" --> E["404 Not Found"]
+    D -- "Pass" --> F["Target Service"]
+    D -- "Fail" --> G["429 Too Many Requests"]
+    F -- "Response" --> B
+    B -- "Response" --> A
+```
+
+## Rate Limiting
+
+To protect the system from brute-force attacks and API hammering, DaakDash implements a Redis-backed rate limiting mechanism.
+
+### IP-Based Key Resolution
+
+The gateway identifies clients based on their IP address. The `RateLimitConfig` class defines a `KeyResolver` that prioritizes the `X-Forwarded-For` header (common in proxied environments) before falling back to the remote host address.
+
+```java
+@Bean
+public KeyResolver ipKeyResolver() {
+    return exchange -> {
+        String forwarded = exchange.getRequest().getHeaders().getFirst("X-Forwarded-For");
+        if (forwarded != null && !forwarded.isBlank()) {
+            return Mono.just(forwarded.split(",")[0].trim());
+        }
+        var remote = exchange.getRequest().getRemoteAddress();
+        return Mono.just(remote != null ? remote.getAddress().getHostAddress() : "unknown");
+    };
+}
+```
+
+### Rate Limit Specifications
+
+Different routes have varying capacities to balance security and availability:
+
+| Route | Replenish Rate | Burst Capacity | Purpose |
+| :--- | :--- | :--- | :--- |
+| `/api/auth/**` | 10 req/s | 20 | Prevent login/register hammering |
+| `/api/track/**` | 20 req/s | 40 | Control tracking query volume |
+
+## System Configuration
+
+### Redis Integration
+The Gateway connects to a Redis instance to maintain the state of rate limit buckets across multiple gateway instances.
+- **Host**: `${REDIS_HOST:redis}`
+- **Port**: `6379`
+
+### Management and Observability
+The gateway exposes several actuator endpoints for monitoring system health and performance:
+- **Health Probes**: Enabled for container orchestration (e.g., Kubernetes/Docker).
+- **Exposed Endpoints**: `health`, `info`, `prometheus`.
+- **Metrics**: Percentile histograms are enabled for `http.server.requests` to provide detailed latency data.
+
+### Security Configuration
+The gateway maintains a JWT secret used for centralized token validation logic:
+```yaml
+app:
+  jwt:
+    secret: ${JWT_SECRET:dev-secret-change-me-with-env-var-min-32-bytes}

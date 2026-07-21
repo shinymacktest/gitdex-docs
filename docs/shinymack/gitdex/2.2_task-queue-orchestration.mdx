@@ -1,237 +1,169 @@
 ---
 title: "Task Queue Orchestration"
-description: "Analysis of the job queue system that handles asynchronous indexing tasks and status tracking."
+description: "Implementation details of the asynchronous job queue, indexing state management, and worker controllers."
 sidebar_position: 2.2
 ---
 # Task Queue Orchestration
 
-The Task Queue Orchestration module in GitDex manages the asynchronous lifecycle of repository indexing. Because indexing a code repository involves high-latency operations—including GitHub API calls, file system traversal, and multiple LLM processing stages—these tasks cannot be handled within a standard synchronous HTTP request-response cycle. 
+## System Role & Architectural Position
 
-This system provides a robust mechanism for job submission, strict serialization of processing tasks to prevent server overload, and a self-healing state machine that recovers from crashes or timeouts. It utilizes Upstash Redis for distributed state management and locking, ensuring that only one indexing job is active at a time across the backend infrastructure.
+The Task Queue Orchestration layer serves as the asynchronous execution backbone of GitDex. Its primary responsibility is to manage the lifecycle of repository indexing jobs, ensuring that LLM-intensive processing pipelines do not overwhelm system resources or exceed API rate limits. 
 
-### Core Module Components
+The system employs a **Strict Serialization** model, where only one active indexing job is processed globally at any given time, while subsequent requests are queued in a FIFO (First-In-First-Out) manner. This is achieved through a combination of Upstash Redis for state persistence and locking, and Upstash QStash for reliable webhook-based job triggering.
 
-| Component | Responsibility | Primary Dependencies |
-| :--- | :--- | :--- |
-| `SimpleQueue` | Manages job state, Redis locks, queue ordering, and self-healing logic. | `@upstash/redis` |
-| `jobsController` | Exposes REST endpoints for job creation, status polling, and maintenance. | `@octokit/rest`, `@upstash/qstash` |
-| `JobData` | TypeScript interface defining the schema for job tracking and metadata. | N/A |
-| `JobState` | Type union defining the lifecycle stages: `queued`, `processing`, `completed`, `failed`. | N/A |
+### Core Component Specifications
 
----
+| Component | Technology | Primary Responsibility | Key Constraint |
+| :--- | :--- | :--- | :--- |
+| `SimpleQueue` | Upstash Redis | Job state tracking, lock management, and queue persistence. | Atomic state transitions via Redis. |
+| `jobsController` | Node.js/Express | Request validation, job initiation, and status polling. | GitHub API rate limit compliance. |
+| `QStash` | Upstash QStash | Asynchronous job triggering and retry logic. | Signature-verified webhook delivery. |
+| `Pipeline` | Node.js | Sequential execution of indexing steps. | Idempotent step execution. |
 
-## Architecture, State & Data Flow
+## Core Execution & Data Flow Mechanics
 
-The orchestration system operates as a state-driven queue. When a user requests to index a repository, the system does not start the process immediately but instead registers a "job" in Redis and manages its transition through various states.
+The orchestration flow follows a rigid state machine to prevent race conditions and duplicate indexing of the same repository.
 
-### Job Lifecycle Flow
-
-1.  **Submission**: `jobsController.createJob` validates the repository's existence via GitHub's API. If valid, it calls `queue.addJob()`.
-2.  **Enqueueing**: `SimpleQueue` checks for existing locks. If no job is currently processing, it attempts to start the job immediately. Otherwise, it pushes the job ID into a Redis list (the queue).
-3.  **Execution**: The system ensures **Strict Serialization**. Only one job can be in the `processing` state. When a job completes or fails, `triggerNextJob()` pops the next ID from the Redis list and marks it as `processing`.
-4.  **Step-Level Locking**: During the AI Processing Pipeline, the system uses `acquireStepLock` to prevent concurrent execution of the same pipeline step, providing a secondary layer of safety.
-5.  **Monitoring**: The frontend polls `getJobStatus` or `getStatusByName`, which reads the current `JobState` and `currentStep` from Redis.
-
-### System Interaction Diagram
+### Job Lifecycle Workflow
 
 ```mermaid
-sequenceDiagram
-    participant Client as "Frontend Client"
-    participant Ctrl as "jobsController"
-    participant Queue as "SimpleQueue"
-    participant Redis as "Redis Store"
-    participant GH as "GitHub API"
-
-    Client->>Ctrl: POST /jobs/create
-    Ctrl->>GH: verifyRepoExists()
-    GH-->>Ctrl: 200 OK
-    Ctrl->>Queue: addJob(repoUrl)
-    Queue->>Redis: set lock:repo_id (TTL 1h)
-    Queue->>Redis: rpush queue_list jobId
-    Queue-->>Ctrl: JobId Created
-    Ctrl-->>Client: 202 Accepted (JobId)
-    
-    loop Polling
-        Client->>Ctrl: GET /jobs/status/:id
-        Ctrl->>Queue: getJob(jobId)
-        Queue->>Redis: get job_data:id
-        Redis-->>Queue: JobData
-        Queue-->>Ctrl: JobData
-        Ctrl-->>Client: { state: 'processing', step: 2 }
-    end
+graph TD
+    A["User Request"] --> B["verifyRepoExists"]
+    B --> C["addJob (Redis)"]
+    C --> D{"Is Job Active?"}
+    D -- "No" --> E["triggerNextJob"]
+    D -- "Yes" --> F["Queue (FIFO)"]
+    E --> G["QStash Webhook"]
+    G --> H["executeNextStep"]
+    H --> I["updateJob State"]
+    I --> J{"Completed?"}
+    J -- "No" --> H
+    J -- "Yes" --> K["completeJob"]
+    K --> E
 ```
 
----
+### Execution Invariants
+*   **Unique Job Identification**: Jobs are keyed by a deterministic ID derived from the `owner` and `repo` names to prevent duplicate concurrent entries for the same repository.
+*   **Distributed Locking**: A two-layer lock mechanism is used:
+    1.  **Redis Lock Key**: A high-level key with a 1-hour TTL to prevent redundant job creation.
+    2.  **Job State**: A `processing` state that acts as a mutex for the pipeline.
+*   **Atomic Step Control**: Granular `StepLocks` (60s TTL) are acquired before executing specific pipeline segments, ensuring that server crashes do not leave the system in a permanently locked state.
 
-## In-Depth Code Walkthrough & Implementation Details
+## Implementation Deep Dive
 
-### Job Enqueueing and Lock Management
+### State Schema and Job Definition
+The system utilizes a strongly typed `JobData` interface to maintain consistent state across Redis and the API layer.
 
-The `addJob` method implements a multi-layered check to prevent duplicate indexing and handle "stuck" jobs.
+```typescript title="server/src/queue.ts"
+export type JobState = 'queued' | 'processing' | 'completed' | 'failed';
+
+export interface JobData {
+    id: string;
+    state: JobState;
+    repoUrl: string;
+    owner: string;
+    repo: string;
+    createdAt: number;
+    updatedAt: number;
+    error?: string | null;
+    currentStep: number;
+    data?: string | null;
+}
+```
+*   `currentStep`: An integer pointer used by the `executeNextStep` logic to resume pipelines.
+*   `updatedAt`: A timestamp used by the self-healing mechanism to detect "stuck" jobs.
+
+### Queue Management & Serialization logic
+The `addJob` method implements the logic for determining whether a job should start immediately or be queued.
 
 ```typescript title="server/src/queue.ts"
 async addJob(repoUrl: string, force = false): Promise<string> {
     const { owner, repo } = parseOwnerRepo(repoUrl);
     const jobId = this.getJobId(owner, repo);
+    
+    // Layer 1: Check Redis lock key (1h TTL)
     const lockKey = this.getLockKey(owner, repo);
-
-    // Global check for stuck jobs before checking locks or state
-    await this.healStuckJobs();
-
-    if (!force) {
-        // Layer 1: Redis lock key (set at job creation, 1h TTL)
-        const lock = await redis.get(lockKey);
-        if (lock) {
-            // Layer 2: Job updatedAt timestamp (fallback if lock key was deleted)
-            const existingJob = await this.getJob(jobId, true);
-            if (existingJob && (Date.now() - existingJob.updatedAt < COOLDOWN_MS)) {
-                return jobId; // Return existing job if within cooldown
-            }
-        }
+    const isLocked = await redis.get(lockKey);
+    
+    if (!force && isLocked) {
+        // Job exists or is recently processed; return existing ID
+        return jobId;
     }
 
+    // Create job metadata
     const job: JobData = {
         id: jobId,
         state: 'queued',
-        repoUrl,
-        owner,
-        repo,
+        repoUrl, owner, repo,
         createdAt: Date.now(),
         updatedAt: Date.now(),
-        currentStep: 0,
+        currentStep: 0
     };
 
-    await this.updateJob(jobId, job);
+    await redis.set(jobId, JSON.stringify(job));
     await redis.set(lockKey, 'locked', { ex: 3600 });
-    await redis.rpush('gitdex_queue', jobId);
-
-    // STRICT SERIALIZATION: Check if any job is currently processing using NX
-    const activeJob = await redis.set('gitdex_active_job', jobId, { nx: true });
-    if (activeJob) {
+    
+    // STRICT SERIALIZATION: Only one active job globally
+    const activeJob = await redis.get('active_job');
+    if (!activeJob) {
         await this.triggerNextJob();
+    } else {
+        await redis.lpush('job_queue', jobId);
     }
-
+    
     return jobId;
 }
 ```
+**Mechanics:**
+1.  **Idempotency**: Uses `getLockKey` to bypass redundant requests.
+2.  **Concurrency Control**: Checks for the `active_job` key. If null, the current job is promoted to active and triggered via QStash. Otherwise, it is pushed to the `job_queue` list.
+3.  **Persistence**: Both the job metadata (Hash/String) and the queue (List) are stored in Redis.
 
-**Technical Analysis:**
-- **Cooldown Mechanism**: `COOLDOWN_MS` (1 hour) prevents users from spamming the index button and restarting expensive AI pipelines.
-- **Distributed Locking**: The `lockKey` prevents the same repository from being queued multiple times simultaneously.
-- **Serialization Logic**: The use of `redis.set(..., { nx: true })` creates an atomic lock on the global `gitdex_active_job` key. If the key doesn't exist, the current request becomes the "orchestrator" that triggers the next job.
-- **Persistence**: All job metadata is stored as a JSON-serialized object in Redis, ensuring state persists across server restarts.
-
-### The Trigger and Transition Logic
-
-The `triggerNextJob` method is the engine that moves the queue forward.
+### Step Locking Mechanism
+To ensure that a single step is not executed multiple times during a timeout or retry, the system implements a transient step lock.
 
 ```typescript title="server/src/queue.ts"
-private async triggerNextJob(): Promise<string | null> {
-    const jobId = await redis.lpop('gitdex_queue');
-    if (!jobId) {
-        // Queue is empty, clear the active job lock
-        await redis.del('gitdex_active_job');
-        return null;
-    }
-
-    await this.updateJob(jobId, { 
-        state: 'processing', 
-        updatedAt: Date.now() 
+async acquireStepLock(jobId: string, sectionIndex?: number): Promise<boolean> {
+    const lockKey = `lock:step:${jobId}:${sectionIndex ?? 0}`;
+    // Set lock with a 60-second TTL
+    const acquired = await redis.set(lockKey, 'locked', {
+        nx: true, 
+        ex: 60 
     });
-    
-    await redis.set('gitdex_active_job', jobId);
-    // Here, the system would typically trigger the external pipeline process
-    return jobId;
+    return acquired === 'OK';
 }
 ```
+**Mechanics:**
+*   `nx: true`: Ensures the key is only set if it does not already exist (Atomic Set-if-Not-Exists).
+*   `ex: 60`: Automatically expires the lock after 60 seconds, allowing the system to recover if the worker process dies mid-step.
 
-**Technical Analysis:**
-- **LPOP Operation**: The use of `lpop` ensures that jobs are processed in First-In-First-Out (FIFO) order.
-- **State Mutation**: Transitioning the state to `processing` is critical for the frontend polling logic; it signals that the system is actively working on the repository.
-- **Lock Renewal**: Re-setting `gitdex_active_job` ensures that as long as the queue has items, the "active" slot is filled.
+## Method / State Reference & Error Recovery
 
-### Job Status and Validation Controller
+### Job State Transitions
 
-The `jobsController` acts as the gateway, ensuring only valid GitHub repositories enter the queue.
-
-```typescript title="server/src/controllers/jobsController.ts"
-export const createJob = async (req: any, res: any) => {
-    const { repoUrl } = req.body;
-    const { owner, repo } = parseOwnerRepo(repoUrl);
-
-    try {
-        // Ensure the repo actually exists and is accessible
-        await verifyRepoExists(owner, repo);
-        const jobId = await queue.addJob(repoUrl);
-        return res.status(202).json({ jobId, message: "Job queued" });
-    } catch (error: any) {
-        return res.status(400).json({ error: error.message });
-    }
-};
-
-export const getStatusByName = async (req: any, res: any) => {
-    const { owner, repo } = req.params;
-    const job = await queue.getJobByRepo(owner, repo);
-
-    if (job && job.state === 'processing') {
-        return res.json({ indexed: false, status: 'processing', step: job.currentStep });
-    }
-
-    // Check if indexed files actually exist in storage
-    const isIndexed = await verifyIndexExists(owner, repo);
-    return res.json({ indexed: isIndexed });
-};
-```
-
-**Technical Analysis:**
-- **Pre-flight Validation**: `verifyRepoExists` prevents the queue from being clogged with invalid URLs or private repositories that the system cannot access.
-- **Active Job Priority**: In `getStatusByName`, the `processing` state takes priority over the file-existence check. This ensures the UI keeps polling while the pipeline is running, even if some files have already been written to disk.
-- **Storage Verification**: `verifyIndexExists` acts as the ultimate source of truth, checking the actual index files on disk to determine if a repository is "indexed."
-
----
-
-## API / Method Reference
-
-### `SimpleQueue` Class Methods
-
-| Method | Parameters | Return Type | Description |
+| From State | Event | To State | Trigger |
 | :--- | :--- | :--- | :--- |
-| `addJob` | `repoUrl: string, force?: boolean` | `Promise<string>` | Validates lock, adds job to Redis list, and attempts to trigger execution. |
-| `getJob` | `jobId: string, bypassSelfHealing?: boolean` | `Promise<JobData \| null>` | Retrieves job data. If `bypassSelfHealing` is false, it checks if the job is stuck. |
-| `updateJob` | `jobId: string, updates: Partial<JobData>` | `Promise<void>` | Performs a partial update on the job metadata in Redis. |
-| `triggerNextJob`| `none` | `Promise<string \| null>` | Pops the next job from the FIFO queue and sets it to `processing`. |
-| `failJob` | `jobId: string, error: string` | `Promise<string \| null>` | Marks job as `failed`, records the error, and triggers the next queued job. |
-| `completeJob` | `jobId: string` | `Promise<string \| null>` | Marks job as `completed` and triggers the next queued job. |
-| `acquireStepLock`| `jobId: string, sectionIndex?: number` | `Promise<boolean>` | Sets a 60s TTL lock on a specific pipeline step to prevent concurrent execution. |
-| `releaseStepLock`| `jobId: string, sectionIndex?: number` | `Promise<void>` | Removes the step-level lock. |
-| `requeueJob` | `jobId: string` | `Promise<void>` | Resets state to `queued` and pushes the job to the front of the queue. |
-| `healStuckJobs` | `none` | `Promise<void>` | Scans for jobs in `processing` state that haven't been updated within the cooldown period. |
+| `null` | `addJob()` | `queued` | API Request $\rightarrow$ Redis `lpush` |
+| `queued` | `triggerNextJob()` | `processing` | QStash Webhook $\rightarrow$ `executeNextStep` |
+| `processing` | `completeJob()` | `completed` | Pipeline Final Step $\rightarrow$ `redis.del(active_job)` |
+| `processing` | `failJob()` | `failed` | Exception $\rightarrow$ `redis.set(state: 'failed')` |
+| `failed` | `requeueJob()` | `queued` | Admin/System Recovery $\rightarrow$ `redis.lpush` (Front) |
 
-### `jobsController` Endpoints
+### Error Recovery & Self-Healing
+The system implements a "Heal" mechanism to prevent the queue from stalling due to orphaned `processing` states.
 
-| Endpoint | Method | Payload | Response | Description |
-| :--- | :--- | :--- | :--- | :--- |
-| `/jobs/create` | `POST` | `{ repoUrl }` | `202 { jobId }` | Initiates the indexing process. |
-| `/jobs/status/:id` | `GET` | `N/A` | `200 { JobData }` | Returns the full state of a specific job. |
-| `/jobs/status/:owner/:repo`| `GET` | `N/A` | `200 { indexed: bool }` | Checks if a repository is indexed or currently processing. |
-| `/jobs/heal` | `POST` | `N/A` | `200 { message }` | Manually triggers the stuck-job recovery logic (Cron). |
+1.  **Stuck Job Detection**: The `healStuckJobs` method (and `getJob` global check) compares the `updatedAt` timestamp of the active job against a `COOLDOWN_MS` (1 hour) threshold.
+2.  **Automatic Re-queuing**: If a job is found to be stuck:
+    *   The `active_job` lock is released.
+    *   The job state is reset to `queued`.
+    *   The job is pushed to the front of the queue to ensure priority recovery.
+3.  **GitHub Verification**: The `getStatusByName` controller implements a "cache-miss" check. Instead of relying solely on Redis, it verifies the existence of the indexed files directly on GitHub via Octokit to reconcile the database state with actual storage.
 
----
+### API Contract: Job Management
 
-## Error Handling, Edge Cases & Performance
-
-### Self-Healing Mechanisms
-The most critical failure mode in a distributed queue is the "Zombie Job"—a job marked as `processing` whose worker crashed before it could call `completeJob` or `failJob`. GitDex handles this via:
-1.  **Global Healing**: `healStuckJobs()` is called during every `addJob` request and via a cron job. It identifies jobs where `updatedAt` is older than `COOLDOWN_MS`.
-2.  **State Reset**: Stuck jobs are automatically transitioned back to `queued` and pushed to the front of the line to ensure they are retried.
-
-### Concurrency and Locking
-To maintain system stability, GitDex employs three layers of locking:
-- **Repository Lock**: `lockKey` (1h TTL) prevents the same repo from being queued multiple times.
-- **Global Execution Lock**: `gitdex_active_job` ensures only one repository is being processed by the AI pipeline at any given time.
-- **Step Lock**: `acquireStepLock` (60s TTL) protects individual pipeline stages. If a server crashes mid-step, the lock expires quickly, allowing a retried job to proceed without manual intervention.
-
-### Performance Considerations
-- **Complexity**: All Redis operations (`LPOP`, `RPUSH`, `GET`, `SET`) are $O(1)$, ensuring the orchestration overhead is negligible compared to the AI processing time.
-- **Polling Efficiency**: The `getStatusByName` endpoint optimizes for the common case (already indexed) by checking file existence, avoiding expensive job lookups for repositories that are already completed.
-- **Memory Footprint**: Job data is kept minimal (metadata only), with the actual indexed content stored in the file system or a vector database, preventing Redis memory exhaustion.
+| Endpoint | Method | Parameter | Description |
+| :--- | :--- | :--- | :--- |
+| `/jobs/create` | `POST` | `repoUrl` | Initializes indexing and enters queue. |
+| `/jobs/status/:id` | `GET` | `id` | Returns `JobData` including `currentStep`. |
+| `/jobs/status/name` | `GET` | `owner`, `repo` | Verifies indexing status via GitHub API. |
+| `/jobs/heal` | `POST` | N/A | Manually triggers `healStuckJobs()` recovery. |

@@ -1,88 +1,75 @@
 ---
 title: "Overview"
-description: "General introduction to GitDex, its purpose, and core value proposition for repository analysis."
+description: "High-level introduction to GitDex and its primary purpose of AI-powered repository analysis."
 sidebar_position: 1
 ---
 # Overview
 
-GitDex is an AI-powered technical documentation engine designed to transform any GitHub repository into a comprehensive, interactive, and search-ready documentation site in seconds. By leveraging Large Language Models (LLMs) and a decoupled indexing pipeline, GitDex automates the tedious process of codebase analysis, structure planning, and documentation authoring.
+GitDex is an AI-powered engine designed to transform raw GitHub repositories into comprehensive, interactive, and searchable technical documentation. Instead of relying on manually maintained wikis that quickly become obsolete, GitDex analyzes the actual codebase structure and leverages Large Language Models (LLMs) to architect and write documentation automatically.
 
-The primary goal of GitDex is to bridge the gap between raw source code and human-readable documentation, providing developers with an immediate understanding of a project's architecture without requiring manual onboarding or outdated README files.
+At its core, GitDex bridges the gap between source code and developer onboarding by automating the synthesis of a repository's intent, architecture, and implementation details into a production-ready documentation site.
 
-## Core Value Proposition
+## The Core Value Proposition
 
-GitDex provides a high-velocity alternative to traditional documentation by automating the entire lifecycle of technical writing:
+GitDex moves beyond simple "chat-with-your-code" interfaces by providing a structured, permanent documentation layer. Its primary objective is to automate the entire documentation lifecycle:
 
-*   **Automated Analysis**: Eliminates manual auditing of files and folders by using AI to map the repository structure.
-*   **Dynamic Content Generation**: Uses LLMs to write detailed Markdown documentation based on actual code implementation rather than assumptions.
-*   **Interactive Exploration**: Moves beyond static pages by providing a chat-based AI assistant capable of answering specific questions about the codebase using ReAct loops.
-*   **Visual Architecture**: Automatically generates Mermaid diagrams to visualize complex relationships within the code.
+*   **Automated Discovery**: Scanning the repository to understand the project footprint.
+*   **Architectural Planning**: Generating a logical Table of Contents (TOC) that mirrors the project's conceptual hierarchy.
+*   **Content Generation**: Using Google Gemini to write detailed Markdown files based on the analyzed code.
+*   **Interactive Exploration**: Providing a web-based reader with an integrated AI assistant for real-time deep dives.
 
-## Key Features
+## High-Level System Architecture
 
-### 1. Multi-Step Indexing Pipeline
-Unlike simple "chat-with-your-pdf" tools, GitDex employs a sophisticated pipeline that:
-1.  **Scans**: Analyzes the repository using the GitHub API.
-2.  **Plans**: Creates a logical Table of Contents (TOC) for the documentation.
-3.  **Writes**: Generates comprehensive MDX files using Google Gemini.
-
-### 2. AI Code Assistant
-The integrated chat interface allows users to query the repository. It utilizes manual ReAct (Reasoning and Acting) loops to ensure the AI can look up specific code segments and provide grounded, accurate answers.
-
-### 3. Serverless-Optimized Queueing
-To overcome the execution time limits inherent in serverless environments (like Vercel), GitDex implements a custom asynchronous orchestration layer.
-
-### 4. Production-Ready Reader
-The output is rendered via a professional documentation UI, featuring full-text search, hierarchical navigation, and responsive design.
-
-## System High-Level Flow
-
-The following diagram illustrates the transformation process from a raw GitHub repository to the final interactive documentation.
+GitDex is implemented as a decoupled full-stack application consisting of a Next.js frontend and a Node.js backend. This separation is critical to handle the long-running nature of AI indexing within serverless environments.
 
 ```mermaid
 graph LR
-    A["GitHub Repo"] --> B["GitDex Server"]
-    B --> C["Gemini AI"]
-    C --> D["Generated MDX"]
-    D --> E["GitHub Docs Repo"]
-    E --> F["GitDex Client"]
-    F --> G["End User"]
-    G --> H["AI Chat Assistant"]
-    H --> B
+    User["User"] --> Client["Next.js Client"]
+    Client --> Server["Express Server"]
+    Server --> GH["GitHub API"]
+    Server --> AI["Google Gemini"]
+    Server --> Queue["Upstash Queue"]
+    Queue --> Server
+    Server --> GH
 ```
 
-## Technical Stack Summary
+### Technical Stack Summary
 
-GitDex is built as a full-stack application split between a high-performance backend orchestrator and a dynamic frontend reader.
-
-| Layer | Technology | Role |
+| Layer | Technology | Purpose |
 | :--- | :--- | :--- |
-| **Frontend Framework** | Next.js (App Router) | Application routing and page generation |
-| **Docs Engine** | Fumadocs | MDX rendering, search, and page hierarchy |
-| **Chat UI** | assistant-ui | Interactive AI chat interface |
-| **Backend Runtime** | Node.js / Express / Bun | API management and pipeline orchestration |
-| **AI Model** | Google Gemini | Code analysis and content generation |
-| **Queue/State** | Upstash Redis & QStash | Async job management and serverless timeout bypass |
-| **GitHub Integration** | Octokit | Programmatic access to repository data |
+| **Frontend** | Next.js, Fumadocs | MDX rendering, dynamic routing, and UI layout. |
+| **AI Interface** | assistant-ui | Interactive chat interface and ReAct loop handling. |
+| **Backend** | Node.js, Express | Orchestration of indexing and API management. |
+| **Orchestration**| Upstash Redis & QStash | Managing asynchronous jobs to prevent serverless timeouts. |
+| **LLM** | Google Gemini | Code analysis, TOC planning, and doc generation. |
+| **Integration** | Octokit | Programmatic access to GitHub repositories. |
 
-## Invariants & Failure Modes
+## The Indexing Pipeline
 
-To ensure production stability, GitDex is designed around several critical architectural constraints and trade-offs:
+The most critical component of GitDex is its **Multi-Step Indexing Pipeline**. Generating documentation for a large repository is too computationally expensive for a single HTTP request. GitDex solves this by decoupling the process into a series of orchestrated events handled by a serverless queue.
 
-### Serverless Timeout Mitigation
-Standard serverless functions often timeout after 10–30 seconds, which is insufficient for full-repository indexing. 
-*   **Invariant**: No single indexing step is performed synchronously in a request-response cycle.
-*   **Solution**: The system uses **QStash** to decouple the workflow into discrete, triggered events, ensuring each step completes within the environment's timeout window.
+### Workflow Transition
 
-### AI Hallucination Control
-Generating documentation automatically carries the risk of the LLM inventing features or misinterpreting logic.
-*   **Mitigation**: The use of **ReAct loops** in the chat assistant forces the AI to retrieve actual code snippets before answering, grounding the responses in the current state of the repository.
+1.  **Scan**: The server uses Octokit to analyze the repository's file structure.
+2.  **Plan**: Gemini analyzes the file tree to create a comprehensive Table of Contents.
+3.  **Write**: The pipeline iterates through the TOC, generating specific Markdown content for each section.
+4.  **Commit**: The final documentation is committed back to a dedicated GitHub documentation repository.
 
-### Rate Limiting and API Quotas
-The system depends on three external APIs: GitHub, Google Gemini, and Upstash.
-*   **Failure Mode**: High-volume indexing requests can trigger GitHub API rate limits or Gemini quota exhaustion.
-*   **Handling**: The queue system provides a natural buffer, allowing the server to process jobs asynchronously rather than failing immediately upon API saturation.
+This asynchronous flow is managed by **Upstash Redis** (for state tracking) and **QStash** (for message brokering), ensuring that the process can recover from failures and bypass execution limits.
 
-### State Consistency
-Since the backend is stateless (serverless), tracking the progress of a multi-step indexing job is challenging.
-*   **Invariant**: **Upstash Redis** serves as the single source of truth for job status, ensuring that the client can poll for progress and the server knows exactly which step of the pipeline to execute next.
+## Configuration Blueprint
+
+To initialize the GitDex environment, the system requires a specific set of integrations. The following environment configuration illustrates the dependencies required for the server to orchestrate the pipeline:
+
+```env
+# AI & GitHub Integration
+GOOGLE_GENERATIVE_AI_API_KEY=your_gemini_api_key
+GITHUB_TOKEN=your_github_personal_access_token
+DOCS_REPO_NAME=gitdex-docs
+
+# Serverless Queue Management
+UPSTASH_REDIS_REST_URL=your_upstash_redis_url
+QSTASH_TOKEN=your_qstash_token
+```
+
+By combining the structured rendering of **Fumadocs** with the reasoning capabilities of **Gemini**, GitDex ensures that the resulting documentation is not just a collection of AI-generated text, but a navigable, search-ready knowledge base that evolves alongside the codebase.

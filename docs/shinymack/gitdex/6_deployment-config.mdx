@@ -1,0 +1,103 @@
+---
+title: "Deployment & Config"
+description: "Guidelines for configuring and deploying the GitDex environment."
+sidebar_position: 6
+---
+# Deployment & Config
+
+The **Deployment & Config** module defines the operational blueprint for the GitDex environment. Because GitDex is architected as a decoupled system—separating the AI-driven Node.js backend from the Next.js frontend—the configuration ensures that both layers are optimized for cloud runtime environments, specifically Vercel.
+
+This module manages how the server handles incoming requests, how the client builds its documentation UI, and how the monorepo maintains consistent paths across different architectural layers.
+
+## Deployment Architecture
+
+GitDex utilizes a serverless deployment model. The backend is designed to run as a Vercel Node.js function, allowing it to scale dynamically based on the volume of repository indexing and AI chat requests.
+
+### Request Routing Flow
+
+The server is configured to act as a single-entry point. All incoming traffic is routed through a central handler, which then delegates the request to the appropriate controller based on the API path.
+
+```mermaid
+graph LR
+    A["User Request"] --> B["Vercel Gateway"]
+    B --> C["vercel.json"]
+    C --> D["index.ts (Handler)"]
+    D --> E["AI/Job Logic"]
+```
+
+## Server Configuration
+
+The server's deployment is governed by the `vercel.json` configuration file. This file is critical because it transforms the Node.js backend into a production-ready serverless function.
+
+### Vercel Routing & Cache Control
+
+The server uses a catch-all route to ensure that the `index.ts` entry point manages all API interactions.
+
+```json
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "index.ts",
+      "use": "@vercel/node"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "index.ts",
+      "headers": {
+        "Cache-Control": "no-store, must-revalidate"
+      }
+    }
+  ]
+}
+```
+
+**Key Implementation Details:**
+- **`@vercel/node`**: This build preset compiles the TypeScript `index.ts` file into a runtime-compatible JavaScript function.
+- **Cache-Control**: The header `no-store, must-revalidate` is explicitly set. This is vital for an AI-powered application where responses are generated dynamically and must not be cached by CDN edges, ensuring users always receive the most current analysis of their repository.
+
+## Client & Documentation Configuration
+
+The GitDex frontend leverages **Fumadocs** to generate its technical documentation and UI. The configuration is split between CLI aliases and MDX processing rules.
+
+### Documentation Pipeline
+
+The client uses a specialized configuration to handle the rendering of complex technical content, such as the Mermaid diagrams used in the system architecture sections.
+
+```typescript
+import { defineDocs, defineConfig } from 'fumadocs-mdx/config';
+import { remarkMdxMermaid } from 'fumadocs-core/mdx-plugins';
+
+// Configuration for MDX processing
+```
+
+By integrating `remarkMdxMermaid`, GitDex allows software architects to write diagrams in plain text within the documentation, which are then rendered as SVG graphics in the browser.
+
+### UI & Path Aliasing
+
+To maintain a clean project structure and avoid "relative path hell" (e.g., `../../../components`), the `cli.json` file defines strict aliases for the UI layer.
+
+| Alias | Path | Purpose |
+| :--- | :--- | :--- |
+| `uiDir` | `./src/components/ui` | Primitive Radix UI components |
+| `componentsDir` | `./src/components` | Business-logic UI components |
+| `libDir` | `./src/lib` | Utility functions and shared logic |
+| `cssDir` | `./src/styles` | Global and modular stylesheets |
+
+This configuration ensures that the build toolchain can resolve components consistently regardless of where the documentation file is located within the `src` directory.
+
+```json
+{
+  "uiLibrary": "radix-ui",
+  "baseDir": "src",
+  "aliases": {
+    "uiDir": "./src/components/ui",
+    "componentsDir": "./src/components",
+    "libDir": "./src/lib"
+  }
+}
+```
+
+This setup allows the frontend to remain highly modular, utilizing **Radix UI** as the foundational primitive library while maintaining a strict directory structure for scalability.

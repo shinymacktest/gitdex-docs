@@ -1,120 +1,101 @@
 ---
 title: "System Architecture"
-description: "High-level architectural overview including the interaction between the Next.js frontend and the Node.js backend."
+description: "Comprehensive overview of the full-stack architecture, detailing the interaction between the Next.js frontend and Node.js backend. (Requires Architecture Diagram)"
 sidebar_position: 2
 ---
 # System Architecture
 
-GitDex employs a decoupled full-stack architecture designed to handle computationally expensive repository indexing and AI-driven codebase analysis. The system is split into a high-performance Next.js frontend for user interaction and a Node.js (Bun-powered) backend for heavy lifting, job orchestration, and AI integration.
+The GitDex architecture is designed as a decoupled full-stack application, separating the presentation layer and the heavy-compute orchestration layer. This separation allows the frontend to remain highly responsive and deployable to edge environments (via Next.js) while the backend handles resource-intensive tasks like repository indexing, AI orchestration, and state persistence via Redis.
 
-## Full-Stack Design
+At its core, GitDex operates as a bridge between raw GitHub repository data and Large Language Models (LLMs), utilizing a job-based processing system to handle the asynchronous nature of code analysis.
 
-The project is structured as a monorepo consisting of a `client` and a `server`. This separation ensures that the user interface remains responsive while the backend manages long-running asynchronous tasks such as cloning repositories and generating embeddings.
+### High-Level Architectural Components
 
-### Architectural Components
+The system is divided into three primary tiers: the Client Application, the API Proxy, and the Backend Server.
 
-| Component | Technology Stack | Primary Responsibility |
-| :--- | :--- | :--- |
-| **Frontend** | Next.js, React 19, Zustand | UI Rendering, Chat Interface, State Management |
-| **Backend** | Node.js (Bun), Express | API Orchestration, Indexing Logic, Job Scheduling |
-| **Queue/Cache** | Upstash Redis & Qstash | Asynchronous Job Queuing and Transient State |
-| **AI Integration** | Vercel AI SDK, Google GenAI | LLM Orchestration and Code Analysis |
-| **Data Source** | Octokit (GitHub API) | Repository Data Extraction |
+| Component | Technology | Role | Key Responsibility |
+| :--- | :--- | :--- | :--- |
+| **Frontend** | Next.js / React | Presentation | UI rendering, state synchronization, and user interaction. |
+| **API Proxy** | Next.js Route Handlers | Gateway | Forwarding client requests to the Node.js backend to manage CORS and security. |
+| **Backend** | Node.js / Express | Orchestration | Repository processing, Redis state management, and AI integration. |
+| **State Store** | Upstash Redis | Persistence | Tracking indexing job progress and caching metadata. |
 
-### System Interaction Diagram
+### Request Flow and Component Interaction
+
+Because the frontend and backend are decoupled, GitDex employs a proxy pattern. Rather than the browser communicating directly with the Node.js server, requests are routed through Next.js server-side handlers. This ensures a unified API surface and simplifies deployment configurations.
 
 ```mermaid
 graph LR
-    User["User Browser"] --> Client["Next.js Frontend"]
-    Client --> Server["Express Backend"]
-    Server --> GitHub["GitHub API (Octokit)"]
-    Server --> Redis["Upstash Redis/Qstash"]
-    Server --> LLM["AI Models (Google/OpenAI)"]
-    Redis -- "Async Triggers" --> Server
+    User["User Browser"] --> NextJS["Next.js Frontend"]
+    NextJS --> Proxy["Next.js Proxy"]
+    Proxy --> Express["Node.js Server"]
+    Express --> Redis["Upstash Redis"]
+    Express --> AI["AI/LLM API"]
+    Express --> GH["GitHub API"]
 ```
 
-## Data Flow and API Communication
+### The Backend Orchestrator
 
-Communication between the client and server is primarily handled via RESTful API calls. Because repository indexing is time-consuming, GitDex utilizes an asynchronous job pattern rather than maintaining long-lived HTTP connections for processing.
+The backend is built with Express and serves as the "brain" of the operation. It doesn't just serve data; it manages complex lifecycles for repository indexing. By integrating `@upstash/redis`, the server can track the status of long-running jobs without blocking the main execution thread.
 
-### Communication Sequence
-
-The following sequence illustrates the flow from the moment a user requests a repository analysis to the final AI chat interaction.
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant C as "Client (Next.js)"
-    participant S as "Server (Express)"
-    participant Q as "Qstash/Redis"
-    participant G as "GitHub API"
-
-    C ->> S: POST /jobs (Repo Request)
-    activate S
-    S ->> Q: Enqueue Indexing Job
-    S -->> C: 202 Accepted (JobID)
-    deactivate S
-    
-    Q -) S: Trigger Job Execution
-    activate S
-    S ->> G: Fetch Repository Files
-    S ->> S: Process & Index Codebase
-    S ->> Q: Update Job Status (Complete)
-    deactivate S
-    
-    C ->> S: GET /jobs/:id (Polling)
-    S -->> C: Job Status: Success
-```
-
-### Core API Endpoints
-
-Based on the server implementation, the backend exposes routes for job management to decouple the request from the processing.
-
-| Method | Endpoint | Description | Payload/Params |
-| :--- | :--- | :--- | :--- |
-| `POST` | `/jobs` | Initiates the indexing pipeline for a repo | `{ "repo": "owner/name" }` |
-| `GET` | `/jobs/:id` | Checks the status of a specific indexing job | `id` (Job UUID) |
-| `POST` | `/chat` | Interfaces with the AI Chat Controller | `{ "messages": [...] }` |
-
-## Technical Implementation Details
-
-### Server Entry Point
-The server uses Express for routing and integrates Upstash Redis for state persistence. The use of Bun as the runtime provides faster startup and execution for the indexing pipeline.
+The entry point initializes the middleware stack and mounts specific route handlers for job management:
 
 ```typescript
-// server/index.ts snippet
+// server/index.ts
 import express from "express";
+import cors from "cors";
 import { Redis } from '@upstash/redis';
 import jobsRoutes from "./src/routes/jobsRoutes.js";
 
 const app = express();
 app.use(cors());
-app.use("/jobs", jobsRoutes);
+app.use(express.json());
+
+// Mounting job-specific routes for indexing and analysis
+app.use("/api/jobs", jobsRoutes);
 ```
 
-### Client State Management
-The frontend leverages `zustand` for lightweight state management and the Vercel AI SDK for streaming responses from the backend to the UI.
+This structure indicates a **Job-Queue Pattern**. When a user requests a repository analysis, the server doesn't process it synchronously. Instead, it likely creates a job entry in Redis, returns a job ID to the client, and processes the repository in the background.
 
-```json
-// Key Client Dependencies
-{
-  "ai": "^6.0.208",
-  "zustand": "^5.0.14",
-  "@assistant-ui/react": "^0.11.58",
-  "next": "^16.2.9"
+### The Proxy Layer
+
+To bridge the gap between the Next.js client and the Express server, GitDex implements a proxy mechanism. This is critical for maintaining a seamless developer experience and avoiding complex CORS configurations across different deployment domains.
+
+```typescript
+// client/proxy.ts
+import { NextResponse } from 'next/server';
+import type { NextRequest } from 'next/server';
+
+export function proxy(request: NextRequest) {
+  // Logic to forward the request to the Node.js backend
+  // ensures the client only interacts with its own domain.
 }
 ```
 
-## Invariants & Failure Modes
+By utilizing `NextResponse` and `NextRequest`, the proxy can intercept requests from the frontend, append necessary authentication headers or environment variables, and forward them to the `server/index.ts` instance.
 
-### Distributed State Consistency
-Since the backend utilizes Upstash Redis and Qstash, the system is designed to be stateless. If the Express server restarts, the job state is preserved in Redis, and Qstash ensures that pending indexing tasks are retried.
+### Frontend Integration & Layout
 
-### Failure Handling
-- **GitHub Rate Limiting:** The server uses `@octokit/rest` to interact with GitHub. Excessive requests during indexing can trigger rate limits; the system relies on the job queue to retry failed fetches.
-- **LLM Token Limits:** The integration of `js-tiktoken` on the server side allows the system to calculate token counts before sending requests to the AI, preventing "context window exceeded" errors.
-- **Client-Server Sync:** The frontend implements polling or guard mechanisms to ensure the UI does not allow AI chat interactions until the corresponding repository index job is marked as `complete` in the backend.
+The frontend uses the Next.js App Router to provide a modern, reactive interface. The root layout integrates `fumadocs-ui` for documentation and `next-themes` for visual consistency, ensuring that the AI assistant's output is rendered in a professional, readable format.
 
-### Performance Trade-offs
-- **Polling vs WebSockets:** The architecture chooses API polling for job status over WebSockets to simplify deployment on serverless environments (like Vercel) where persistent socket connections are restricted.
-- **Bun Runtime:** Bun is used specifically for the server to optimize the filesystem-heavy operations involved in repository analysis.
+The layout acts as the global provider wrapper, ensuring that state and theme contexts are available to all child components, including the AI chat interface and the repository visualization tools.
+
+```typescript
+// client/src/app/layout.tsx
+export default function RootLayout({ children }: { children: React.ReactNode }) {
+  return (
+    <html lang="en" suppressHydrationWarning>
+      <body>
+        <ThemeProvider>
+          <RootProvider>
+            {children}
+            <Toaster />
+          </RootProvider>
+        </ThemeProvider>
+      </body>
+    </html>
+  );
+}
+```
+
+This architectural choice ensures that while the backend is performing heavy lifting—such as parsing thousands of lines of code—the frontend remains fluid, providing real-time updates on job progress via the proxy and Redis.

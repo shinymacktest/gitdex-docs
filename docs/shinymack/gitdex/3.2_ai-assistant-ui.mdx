@@ -1,130 +1,90 @@
 ---
-title: "AI Assistant UI Components"
-description: "Breakdown of the chat interface, including message threads, markdown rendering, and tool fallbacks."
+title: "AI Assistant UI"
+description: "Overview of the chat interface components and the integration of markdown and Mermaid diagrams."
 sidebar_position: 3.2
 ---
-# AI Assistant UI Components
+# AI Assistant UI
 
-The AI Assistant UI provides a sophisticated, interactive chat interface that allows users to query the indexed repository. It is built upon the `@assistant-ui` framework, integrating streaming AI responses, structured markdown rendering, and specialized handlers for tool calls.
+The AI Assistant UI is the primary interaction layer of GitDex, serving as the human-AI bridge that transforms raw LLM responses into a structured, interactive chat experience. Rather than building a chat interface from scratch, GitDex leverages `@assistant-ui/react` as a foundation, extending it with specialized components for code repository analysis, such as markdown rendering and dynamic Mermaid.js diagrams.
 
-## Component Architecture
+This module is responsible for maintaining the conversational state, handling user input through a rich composer, and rendering complex technical content (code blocks, diagrams, and tool outputs) in a readable format.
 
-The UI is organized hierarchically, moving from the global layout wrapper down to granular content renderers.
+### Core Component Architecture
+
+The UI is organized into a hierarchy where high-level primitives manage the state and layout, while specialized leaf components handle the presentation of specific data types.
+
+| Component | Role | Key Responsibility |
+| :--- | :--- | :--- |
+| `Thread` | Orchestrator | Manages the overall chat layout, including the message list and composer. |
+| `MessagePrimitive` | Renderer | Handles the display of individual messages (User vs. Assistant). |
+| `MarkdownText` | Formatter | Parses AI responses into formatted HTML/React components. |
+| `Mermaid` | Visualizer | Renders text-based Mermaid syntax into SVG diagrams. |
+| `ComposerPrimitive`| Input | Manages user queries and attachment uploads. |
+
+### Interaction & Rendering Flow
+
+The flow of a response from the AI to the screen involves a multi-stage rendering pipeline. When the assistant returns a response containing markdown and diagram syntax, the UI must intercept and process these elements before final display.
 
 ```mermaid
 graph TD
-    A["AssistantModal"] --> B["AssistantRuntimeProvider"]
-    B --> C["Thread"]
-    C --> D["MessagePrimitive"]
-    D --> E["MarkdownText"]
-    D --> F["ToolFallback"]
-    C --> G["ComposerPrimitive"]
-    C --> H["ActionBarPrimitive"]
+    A["AI Response"] --> B["MarkdownText"]
+    B --> C{"Content Type?"}
+    C -- "Standard Text" --> D["HTML Rendering"]
+    C -- "Mermaid Block" --> E["Mermaid Component"]
+    E --> F["Syntax Cleanup"]
+    F --> G["mermaid.render()"]
+    G --> H["SVG Output"]
 ```
 
-## The Chat Runtime
+### The Visualization Pipeline: Mermaid Integration
 
-The assistant's state and communication logic are managed by a runtime provider and transport layer. This decoupling allows the UI components to remain agnostic of the specific AI SDK implementation.
+One of the most powerful features of the AI Assistant UI is its ability to visualize repository structures and logic flows via Mermaid.js. Because LLMs occasionally produce slightly malformed Mermaid syntax, GitDex implements a robust sanitization and rendering pipeline within `client/src/components/mermaid.tsx`.
 
-### Runtime Integration
-The `AssistantModal` initializes the chat environment using:
-- `AssistantRuntimeProvider`: Provides the context for the chat state.
-- `useChatRuntime`: A hook to interact with the active chat session.
-- `AssistantChatTransport`: Handles the actual network communication between the client and the AI backend.
+#### Syntax Sanitization
+To ensure reliability, the `Mermaid` component doesn't pass raw AI output directly to the renderer. It employs utility functions to "clean" the content and fix common syntax errors.
 
-## Core UI Components
+```typescript
+function fixMermaidSyntax(chart: string): string {
+  // Logic to ensure the chart starts with a valid 
+  // Mermaid diagram definition (e.g., graph TD, sequenceDiagram)
+  // and removes trailing whitespace or invalid characters.
+  return cleanContent(chart);
+}
+```
 
-### 1. Assistant Modal
-The `AssistantModal` acts as the entry point and container. It features a resizable side-panel implementation to ensure the chat does not obstruct the main codebase visualization.
+#### Optimized Rendering
+To prevent flickering and redundant CPU usage during React re-renders, the module utilizes a `cachePromise` pattern. This ensures that a diagram is only rendered once for a specific key, and subsequent requests for that same diagram return the cached promise.
 
-**Resizing Logic:**
-The modal implements custom mouse event listeners to track movement and update the panel width dynamically.
+```typescript
+async function renderMermaid(chart: string, theme: string) {
+  const id = `mermaid-${Math.random().toString(36).substr(2, 9)}`;
+  const { svg } = await mermaid.render(id, chart);
+  return svg;
+}
+```
+
+### Chat Interface Implementation
+
+The `Thread` component (found in `client/src/components/assistant-ui/thread.tsx`) integrates several UX enhancements to make the AI interaction feel production-ready.
+
+#### 1. Adaptive User Actions
+The `UserActionBar` provides context-aware controls for the user. By utilizing `ActionBarPrimitive`, GitDex allows users to interact with AI messages through actions like:
+* **Regeneration:** Using `RefreshCwIcon` to trigger a new response.
+* **Copying:** Using `CopyIcon` to clip responses to the clipboard.
+* **Editing:** Using `PencilIcon` to modify previous prompts.
+
+#### 2. Rich Composer & Attachments
+The input area is more than a simple text box. It integrates `ComposerAddAttachment` and `ComposerAttachments`, allowing users to provide specific context (like files or code snippets) to the AI, which is then tracked via `UserMessageAttachments`.
+
+#### 3. Enhanced Viewability
+Since technical diagrams can become massive, the `Mermaid` component implements a "Maximize" feature using a Radix-based Dialog.
 
 ```tsx
-const handleMouseMove = (mouseMoveEvent: MouseEvent) => {
-  const newWidth = mouseMoveEvent.clientX;
-  if (newWidth > 300 && newWidth < 800) {
-    setPanelWidth(newWidth);
-  }
-};
+// Snippet from Mermaid component
+<div onClick={() => setOpen(true)} className="cursor-pointer">
+  <Maximize2 className="h-4 w-4" />
+  <MermaidContent chart={chart} />
+</div>
 ```
 
-### 2. Chat Thread
-The `Thread` component is the primary orchestration layer for the conversation. It utilizes several primitives to create a seamless chat experience.
-
-| Component/Primitive | Purpose |
-| :--- | :--- |
-| `ThreadPrimitive` | The main container for the message history. |
-| `ComposerPrimitive` | The input area where users type queries and add attachments. |
-| `MessagePrimitive` | Individual message bubbles for either the user or the assistant. |
-| `ThreadWelcome` | Initial state displayed when no messages exist in the thread. |
-| `ThreadSuggestions` | Pre-defined prompt chips to guide user interaction. |
-
-### 3. Markdown Rendering
-The `MarkdownText` component extends standard markdown capabilities to support technical documentation and architectural diagrams.
-
-**Rendering Pipeline:**
-The component uses a combination of `remark` and `rehype` plugins to process content:
-- `remark-gfm`: GitHub Flavored Markdown.
-- `remark-math` & `rehype-katex`: Mathematical notation rendering.
-- `Mermaid`: Custom integration for rendering Mermaid.js diagrams directly in the chat.
-
-**Code Block Enhancement:**
-Custom `CodeHeader` components are used to provide metadata and a one-click copy function for code snippets.
-
-```tsx
-const onCopy = () => {
-  navigator.clipboard.writeText(code);
-  setCopied(true);
-  setTimeout(() => setCopied(false), 2000);
-};
-```
-
-### 4. Tool Fallbacks
-When the AI invokes a tool (e.g., searching the codebase or reading a file), the `ToolFallback` component provides visual feedback to the user.
-
-**Tool State Management:**
-The component implements `ToolCallMessagePartComponent` to handle three primary states:
-
-| State | Icon | UI Behavior |
-| :--- | :--- | :--- |
-| **Loading** | `Loader2Icon` | Displays a spinning indicator while the tool executes. |
-| **Success** | `CheckIcon` | Confirms tool completion; allows collapsing the output. |
-| **Error** | `XCircleIcon` | Alerts the user that the tool call failed. |
-
-## Interaction Flow
-
-The following sequence diagram illustrates the lifecycle of a user request that triggers a tool call.
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant U as User
-    participant C as Composer
-    participant R as Runtime
-    participant B as Backend
-    participant TF as ToolFallback
-
-    U ->> C: Enter Prompt
-    C ->> R: Dispatch Message
-    R ->> B: Request AI Response
-    B -->> R: Tool Call Request
-    R ->> TF: Render Loading State
-    B -->> R: Tool Result
-    R ->> TF: Render Success State
-    R ->> U: Final Markdown Response
-```
-
-## Invariants & Failure Modes
-
-### Streaming and Rendering
-- **Invariant**: Markdown rendering must be memoized via `unstable_memoizeMarkdownComponents` to prevent expensive re-renders of the entire chat thread during token streaming.
-- **Failure Mode**: If a Mermaid diagram contains syntax errors, the `Mermaid` component must handle the error gracefully without crashing the entire message thread.
-
-### Tool Execution
-- **Edge Case**: When a tool call is initiated but the connection is severed, the `ToolFallback` may remain in a "Loading" state. The system relies on the `ErrorPrimitive` to catch and display network-level failures.
-- **State Handling**: Tool outputs can be large. The `ToolFallback` uses a collapsible UI pattern to prevent long tool outputs from pushing the actual AI response off-screen.
-
-### UI Constraints
-- **Boundaries**: The resizable panel is constrained between 300px and 800px to maintain usability across different screen resolutions.
-- **Input**: The `Composer` integrates with attachment handlers, ensuring that file references are correctly passed to the runtime as part of the message payload.
+This allows engineers to toggle between a compact inline view and a full-screen modal (`MermaidDialogContent`) for deep architectural analysis.

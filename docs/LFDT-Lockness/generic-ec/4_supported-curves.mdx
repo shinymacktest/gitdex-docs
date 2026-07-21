@@ -1,0 +1,120 @@
+---
+title: "Supported Curves"
+description: "Documentation of the specific elliptic curves implemented in the library, such as Ed25519, and their specific configurations."
+sidebar_position: 4
+---
+# Supported Curves
+
+The `generic-ec-curves` crate provides a collection of elliptic curve implementations that are supported out-of-the-box by the `generic-ec` ecosystem. These implementations leverage specialized underlying libraries to ensure efficiency and correctness while adhering to the generic interfaces defined in `generic-ec-core`.
+
+## Overview of Implemented Curves
+
+The library provides support for several industry-standard curves. The following table summarizes the curves mentioned in the project's version history and implementation files:
+
+| Curve | Status | Notes |
+| :--- | :--- | :--- |
+| **Ed25519** | Fully Implemented | Edwards curve implementation using `curve25519` crate. |
+| **secp384r1** | Added (v0.3.0) | NIST P-384 curve. |
+| **secp256k1** | Supported | Includes `Additive::double` implementation. |
+| **secp256r1** | Supported | Includes `Additive::double` implementation. |
+| **stark** | Supported | Includes `Additive::double` implementation. |
+
+## Ed25519 Implementation
+
+The Ed25519 curve is implemented as a wrapper around the `curve25519` crate, providing a bridge to the `generic-ec` traits.
+
+### Architecture and Type Mapping
+
+The implementation maps generic types to specific `curve25519` primitives to maintain type safety and performance.
+
+```mermaid
+classDiagram
+    direction LR
+    class Ed25519 {
+        <<struct>>
+    }
+    class Point {
+        <<struct>>
+        +curve25519::EdwardsPoint 0
+    }
+    class Scalar {
+        <<struct>>
+        +curve25519::Scalar 0
+    }
+    Ed25519 --> Point : "type Point"
+    Ed25519 --> Scalar : "type Scalar"
+    Point ..> "curve25519::EdwardsPoint" : "wraps"
+    Scalar ..> "curve25519::Scalar" : "wraps"
+```
+
+### Point Configuration
+The `Point` type represents a point on the Ed25519 curve.
+
+- **Coordinate System**: The implementation uses `curve25519::EdwardsPoint`.
+- **Affine Coordinates**: Affine coordinates are explicitly **not exposed** for the Ed25519 curve (`CoordinateArray = [u8; 0]`).
+- **Point Arithmetic**: Supports standard addition, subtraction, negation, and scalar multiplication.
+- **Validation**: Includes checks for `is_on_curve` and `is_torsion_free`.
+
+### Scalar Configuration
+The `Scalar` type represents a scalar value used for point multiplication and key generation.
+
+- **Randomization**: Implements `random_vartime` using a `FakeCryptoRng` wrapper around `rand_core::RngCore`.
+- **Modular Arithmetic**: Provides `invert` operations and constants for `ONE` and `ZERO`.
+
+## Encoding and Serialization
+
+The library implements specific byte-array lengths for serialization and deserialization of points and scalars to ensure interoperability.
+
+### Ed25519 Byte Layouts
+
+| Entity | Encoding Type | Byte Length | Source Method |
+| :--- | :--- | :--- | :--- |
+| **Point** | Compressed | 32 bytes | `to_bytes_compressed()` |
+| **Scalar** | LE/BE Bytes | 48 bytes | `to_le_bytes()` / `to_be_bytes()` |
+| **Scalar** | Mod Order | 32 bytes | `from_le_array_mod_order()` |
+| **Scalar** | Wide Mod Order | 64 bytes | `from_le_array_mod_order()` (64-byte variant) |
+
+### Implementation Snippets
+
+#### Point Decoding
+Points are decoded from compressed bytes using the `CompressedEdwardsY` primitive:
+
+```rust
+fn decode(bytes: &[u8]) -> Option<Self> {
+    let compressed = curve25519::edwards::CompressedEdwardsY::from_slice(bytes).ok()?;
+    compressed.decompress().map(Self)
+}
+```
+
+#### Scalar Generation from Bytes
+The implementation supports several ways to create scalars from byte arrays, including wide arrays for modular reduction:
+
+```rust
+fn from_le_array_mod_order(bytes: &[u8; 32]) -> Self {
+    Self(curve25519::Scalar::from_bytes_mod_order(*bytes))
+}
+
+fn from_le_array_mod_order(bytes: &[u8; 64]) -> Self {
+    Self(curve25519::Scalar::from_bytes_mod_order_wide(bytes))
+}
+```
+
+## Component Interaction Flow
+
+The following sequence diagram illustrates how a high-level request for a point multiplication on the Ed25519 curve flows through the library layers.
+
+```mermaid
+sequenceDiagram
+    autonumber
+    participant Client as "Application Code"
+    participant GenEC as "Ed25519 Implementation"
+    participant C25519 as "curve25519 Crate"
+
+    Client ->> GenEC: mul(Point, Scalar)
+    activate GenEC
+    GenEC ->> C25519: a.0 * b.0 (EdwardsPoint * Scalar)
+    activate C25519
+    C25519 -->> GenEC: Resulting EdwardsPoint
+    deactivate C25519
+    GenEC -->> Client: Point(EdwardsPoint)
+    deactivate GenEC

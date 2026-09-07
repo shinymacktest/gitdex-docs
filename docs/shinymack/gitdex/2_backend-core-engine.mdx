@@ -1,158 +1,116 @@
 ---
 title: "Backend Core Engine"
-description: "Analysis of the server-side runtime, focusing on the entry point, dependency management, and global configurations."
+description: "The central server logic coordinating AI services, repository indexing, and job execution."
 sidebar_position: 2
 ---
 # Backend Core Engine
 
+The Backend Core Engine serves as the orchestration layer of the GitDex ecosystem. It is responsible for managing the lifecycle of repository analysis jobs, coordinating between the GitHub API and LLM providers, and ensuring asynchronous task reliability via a distributed queue. The engine is implemented as a high-performance TypeScript server running on the Bun runtime, leveraging Express for request routing and middleware.
+
 ## System Role & Architectural Position
 
-The Backend Core Engine serves as the authoritative orchestration layer for the GitDex ecosystem. It is a high-performance Node.js/Bun runtime environment responsible for mediating between the GitHub REST API, the Upstash Redis state store, and the Google Generative AI pipeline. 
+The Core Engine acts as the central controller that decouples client requests from long-running AI processing tasks. By utilizing a producer-consumer pattern via QStash and Redis, the system avoids request timeouts associated with heavy repository indexing and LLM token generation.
 
-Architecturally, the engine functions as a stateless API gateway that offloads heavy computation (repository indexing and LLM processing) to asynchronous workers via QStash, while maintaining synchronous control over job status and system configuration.
+### Core Technology Stack & Dependencies
 
-### Dependency Matrix & Runtime Specifications
-
-| Component | Library / Tool | Technical Purpose | Criticality |
-| :--- | :--- | :--- | :--- |
-| **Runtime** | `Bun` | High-performance JS runtime with native TS support and fast module resolution. | Core |
-| **Web Framework** | `Express 5.x` | Routing and middleware orchestration for RESTful endpoints. | Core |
-| **State Store** | `@upstash/redis` | Distributed key-value store for job tracking, locking, and indexing state. | Core |
-| **Job Queue** | `@upstash/qstash` | Serverless message queuing for asynchronous indexing pipelines. | High |
-| **AI SDK** | `ai` / `@ai-sdk/google` | Unified interface for LLM interaction and streaming responses. | High |
-| **Repo Processing** | `repomix` | Packing repository structures into LLM-optimized contexts. | High |
-| **Git Integration** | `@octokit/rest` | Programmatic access to GitHub's REST API for source retrieval. | High |
-
----
+| Component | Implementation | Technical Purpose |
+| :--- | :--- | :--- |
+| **Runtime** | `Bun` | High-performance JS/TS runtime with native TypeScript support. |
+| **API Framework** | `Express v5.2.1` | Routing, middleware orchestration, and request handling. |
+| **Task Queue** | `@upstash/qstash` | Distributed scheduling and HTTP-based asynchronous job triggering. |
+| **State Store** | `@upstash/redis` | Low-latency caching of job statuses and processed repository metadata. |
+| **Repo Packaging** | `repomix` | Packing local/remote repositories into LLM-optimized contexts. |
+| **AI SDK** | `ai` / `@google/genai` | Interface for Google Gemini and Vercel AI SDK integration. |
+| **Tokenization** | `js-tiktoken` | Precise LLM context window calculations and token compression. |
+| **GitHub Client** | `@octokit/rest` | Authenticated interaction with GitHub REST API. |
 
 ## Core Execution & Data Flow Mechanics
 
-The server operates on a request-response cycle optimized for serverless deployment on Vercel. A critical architectural constraint is the preservation of the raw request body to ensure the integrity of HMAC signatures used by QStash for webhook verification.
+The engine processes repository analysis through a non-blocking pipeline. When a request to index a repository is received, the server does not process the data immediately; instead, it schedules a job and returns a tracking ID to the client.
 
-### Request Lifecycle Flow
+### High-Level Job Orchestration Flow
 
 ```mermaid
-graph TD
-    A["Incoming Request"] --> B["Express Middleware"]
-    B --> C["Raw Body Capture"]
-    C --> D["CORS/Auth Layer"]
-    D --> E["Route Dispatcher"]
-    E --> F["Job Controller"]
-    E --> G["System Utilities"]
-    F --> H["Upstash Redis"]
-    F --> I["QStash Trigger"]
-    G --> H
+graph LR
+    A["Client Request"] --> B["Express Router"]
+    B --> C["Job Controller"]
+    C --> D["QStash Scheduler"]
+    D --> E["Pipeline Worker"]
+    E --> F["Repomix Packer"]
+    F --> G["LLM Service"]
+    G --> H["Redis Store"]
+    H --> I["Client Polling"]
 ```
 
-### Execution Invariants
-*   **Body Preservation:** The engine captures the raw buffer before JSON parsing. This is a non-negotiable requirement for `qstash` signature verification; once `express.json()` parses the body, the original byte sequence is lost, rendering cryptographic verification impossible.
-*   **Statelessness:** All session and job state are persisted in Redis. The server maintains no local in-memory state, allowing horizontal scaling across Vercel's serverless functions.
-*   **Asynchronous Handoff:** High-latency operations (indexing) are never performed in the request thread. The engine validates the request, persists a "pending" state in Redis, and dispatches a trigger to QStash.
-
----
+### Key Execution Invariants
+*   **Asynchronous Decoupling**: All repository processing is offloaded to QStash to prevent HTTP 504 timeouts during large-scale file indexing.
+*   **Stateless Processing**: The server maintains no local state; all job progress and AI outputs are persisted in Redis, allowing for horizontal scaling of the backend.
+*   **Raw Body Integrity**: To maintain the security of QStash webhooks, the server captures the raw request buffer before JSON parsing to allow for cryptographic signature verification.
+*   **CORS Strictness**: Access is restricted to a whitelist defined by `CLIENT_URLS` and `.vercel.app` domains to prevent unauthorized cross-origin AI service exploitation.
 
 ## Implementation Deep Dive
 
-### Server Initialization & Middleware Stack
+### Server Entry Point & Middleware Configuration
 
-The entry point configures the Express application with a focus on cross-origin resource sharing (CORS) and environment injection via `dotenv`.
+The server initialization focuses on security and the specific requirement of QStash signature verification.
 
 ```typescript title="server/index.ts"
-import express, { Request, Response, NextFunction } from "express";
-import dotenv from "dotenv";
-import cors from "cors";
-import { Redis } from '@upstash/redis';
-import jobsRoutes from "./src/routes/jobsRoutes.js";
-
-dotenv.config();
+// ... imports
 const app = express();
 
 // CRITICAL: Capture the raw body BEFORE parsing JSON, so QStash signature verification works
-app.use(express.text({ type: 'application/json' })); 
-
-app.use(cors());
-app.use("/api/jobs", jobsRoutes);
-
-app.listen(process.env.PORT || 3000, () => {
-  console.log(`GitDex Core Engine running on port ${process.env.PORT || 3000}`);
-});
-```
-
-**Technical Analysis:**
-1.  **`express.text({ type: 'application/json' })`**: This overrides the standard JSON parser. It forces Express to treat the JSON payload as a string, preserving the exact formatting required for signature checks.
-2.  **Module Resolution**: The use of `.js` extensions in imports (e.g., `./src/routes/jobsRoutes.js`) adheres to ESM (ECMAScript Modules) standards, ensuring compatibility with the `type: "module"` definition in `package.json`.
-
-### Redis State Management & Dev Utilities
-
-The engine implements a manual "wipe" mechanism for development, utilizing Redis pattern matching to clear job locks and state.
-
-```typescript title="server/index.ts"
-// Development route to clear Redis jobs and locks
-app.delete("/dev/clear-redis", async (req, res) => {
-  const keys = await redis.keys("*");
-  const jobKeys = keys.filter(k => k.includes("job:") || k.includes("lock:"));
-  
-  if (jobKeys.length > 0) {
-    await redis.del(...jobKeys);
+app.use(express.json({
+  verify: (req: RequestWithRawBody, _res, buf) => {
+    req.rawBody = buf.toString();
   }
-  res.json({ deleted: jobKeys.length, keys });
-});
+}));
+
+app.use("/api", jobsRoutes);
+app.use("/api/dev", devRoutes);
 ```
 
-**Technical Analysis:**
-1.  **Pattern Matching**: The `redis.keys("*")` call identifies all active keys, which are then filtered by prefix (`job:`, `lock:`).
-2.  **Atomic Deletion**: Using the spread operator `...jobKeys` with `redis.del` ensures that all identified state keys are removed in a single round-trip to the Upstash cluster.
-3.  **Lock Removal**: Clearing `lock:` keys is essential to reset the "cooldown" period, allowing a repository to be re-indexed immediately during development cycles.
+**Mechanics:**
+1.  **`RequestWithRawBody`**: Extends the standard Express `Request` type to include an optional `rawBody` string.
+2.  **`express.json({ verify })`**: This hook intercepts the incoming stream. By assigning `buf.toString()` to `req.rawBody`, the engine preserves the exact byte sequence needed by `@upstash/qstash` to validate that the request originated from the trusted QStash service.
+3.  **Route Segmentation**: The `/api` prefix separates production job logic from `/api/dev` diagnostic tools.
 
----
+### Infrastructure Configuration
 
-## Method / State Reference & Error Recovery
+The system is configured for strict type safety and modern ESM resolution, as defined in the TypeScript configuration.
 
-### Redis Key Schema
-
-The Backend Core Engine utilizes a structured naming convention for keys in Upstash Redis to prevent collisions and facilitate bulk cleanup.
-
-| Key Pattern | Data Type | TTL | Description |
-| :--- | :--- | :--- | :--- |
-| `job:{repo_id}` | Hash/JSON | 24h | Tracks indexing progress, status (pending/complete), and timestamps. |
-| `lock:{repo_id}` | String | 1h | Prevents concurrent indexing requests for the same repository. |
-| `tree:{owner}/{repo}` | JSON | Permanent | Stores the processed file tree mapping for the AI context. |
-
-### Vercel Deployment Configuration
-
-The `vercel.json` file defines the routing and runtime behavior for the serverless environment.
-
-```json title="server/vercel.json"
+```json title="server/tsconfig.json"
 {
-  "version": 2,
-  "builds": [
-    {
-      "src": "index.ts",
-      "use": "@vercel/node"
-    }
-  ],
-  "routes": [
-    {
-      "src": "/(.*)",
-      "dest": "index.ts",
-      "headers": {
-        "Cache-Control": "no-store, must-revalidate"
-      }
-    }
-  ]
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "Preserve",
+    "moduleResolution": "bundler",
+    "allowImportingTsExtensions": true,
+    "noUncheckedIndexedAccess": true,
+    "strict": true
+  }
 }
 ```
 
-**Configuration Breakdown:**
-*   **`@vercel/node`**: Specifies the use of the Node.js runtime for the `index.ts` entry point.
-*   **`Cache-Control: no-store`**: This header is critical for the `/api/jobs` endpoints. It prevents Vercel's Edge Network from caching job status responses, ensuring the frontend always receives the real-time state from Redis.
-*   **Wildcard Routing**: `/(.*)` directs all incoming traffic to the Express application, allowing Express to handle the internal routing logic via `jobsRoutes`.
+**Configuration Rationale:**
+*   **`module: Preserve` & `moduleResolution: bundler`**: Optimizes the build for Bun's native module resolution, enabling faster cold starts.
+*   **`noUncheckedIndexedAccess`**: Forces explicit null checks when accessing arrays or maps, critical for preventing runtime crashes during the parsing of unpredictable repository file structures.
+
+## Method / State Reference & Error Recovery
+
+### API Endpoint Contract
+
+| Endpoint | Method | Purpose | Expected Payload |
+| :--- | :--- | :--- | :--- |
+| `/health` | `GET` | Liveness probe for orchestrator | N/A |
+| `/api/jobs` | `POST` | Trigger repository indexing | `{ repo: string, options: object }` |
+| `/api/jobs/:id` | `GET` | Poll job status/result | N/A |
+| `/api/dev/*` | `ANY` | Developer diagnostics | Variable |
 
 ### Failure Modes & Recovery
 
-| Failure Mode | Detection | Recovery Mechanism |
+| Failure Scenario | Detection Mechanism | Recovery Strategy |
 | :--- | :--- | :--- |
-| **QStash Signature Mismatch** | 401 Unauthorized | Validation of `raw-body` capture logic and secret key alignment. |
-| **Redis Connection Timeout** | 503 Service Unavailable | Exponential backoff implemented via `@upstash/redis` client. |
-| **LLM Context Overflow** | AI SDK Error | Token counting via `js-tiktoken` and repomix filtering. |
-| **Concurrent Indexing Collision** | 429 Too Many Requests | `lock:{repo_id}` check during the request pipeline entry. |
+| **CORS Violation** | Express middleware check | Returns `Error('Not allowed by CORS')` $\rightarrow$ 403 Forbidden. |
+| **QStash Sig Mismatch** | `rawBody` verification failure | Request rejected immediately; QStash triggers automatic retry based on backoff policy. |
+| **LLM Context Overflow** | `js-tiktoken` count $> \text{Limit}$ | Implementation of token compression or chunking via `repomix` configuration. |
+| **Unhandled Exception** | Global Error Middleware | Catches `Error` object, logs to stderr, returns 500 Internal Server Error to prevent leakage of system internals. |

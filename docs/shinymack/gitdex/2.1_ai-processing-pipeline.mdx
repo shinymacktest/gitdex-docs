@@ -1,170 +1,181 @@
 ---
 title: "AI Processing Pipeline"
-description: "Technical deep-dive into the LLM integration logic and the data transformation pipeline used for repository indexing."
+description: "Logic for repository data extraction, token compression, and LLM service integration."
 sidebar_position: 2.1
 ---
 # AI Processing Pipeline
 
+The AI Processing Pipeline is the core data transformation engine of GitDex. It implements a deterministic sequence of repository scanning, content sampling, token optimization, and LLM-driven synthesis to convert raw source code into structured documentation. The pipeline operates as a series of asynchronous steps coordinated by the Backend Core Engine and persisted via the GitHub Git Data API.
+
 ## System Role & Architectural Position
 
-The AI Processing Pipeline serves as the orchestration engine for transforming raw GitHub repository source code into a structured, LLM-generated documentation site. It operates as a distributed asynchronous workflow, leveraging a state machine persisted in Redis and triggered via QStash to bypass execution timeouts inherent in serverless environments.
+The pipeline serves as the intermediary between the external GitHub API and the internal LLM services. It is designed to handle the "context window problem" by implementing a sophisticated sampling and compression strategy, ensuring that the most representative parts of a codebase are sent to the LLM without exceeding token limits or triggering aggressive rate limits.
 
-The pipeline implements a "Map-Reduce" inspired approach to documentation: it first maps the repository structure, reduces the context into a structural plan (TOC), maps the generation of individual sections in parallel, and finally reduces the generated artifacts into a single GitHub commit.
+### Pipeline Specifications & Dependencies
 
-### Core Pipeline Specifications
-
-| Component | Technology | Responsibility |
-| :--- | :--- | :--- |
-| **LLM Provider** | `@ai-sdk/google` | High-context window generation and structural planning. |
-| **Context Compression** | `repomix` | Packing multiple source files into a single, LLM-optimized prompt. |
-| **Token Counting** | `js-tiktoken` | Precise prompt size calculation to prevent context window overflow. |
-| **Orchestration** | `Upstash QStash` | Reliable asynchronous job triggering and staggered delays. |
-| **State Store** | `Redis` | Persistence of `PipelineData` across distributed worker executions. |
-| **VCS Integration** | `@octokit/rest` | Repository scanning and final documentation commit. |
+| Component | Responsibility | Dependency | Key Configuration |
+| :--- | :--- | :--- | :--- |
+| `githubService` | Data extraction, tree traversal, and Git persistence | `@octokit/rest` | `DOCS_REPO_NAME`, `DOCS_REPO_OWNER` |
+| `compressionService` | Token reduction and content normalization | `repomix` | `output.compress: true` |
+| `aiService` | LLM orchestration and rate-limit management | `@ai-sdk/google` | `DOCS_MODELS`, `AI_THROTTLE_MS` |
+| `redis` | State caching and idempotency checks | `ioredis` | `repo_exists:*`, `last_indexed:*` |
 
 ## Core Execution & Data Flow Mechanics
 
-The pipeline follows a strict sequential state transition model. Each step is encapsulated in a job that, upon completion, triggers the subsequent phase via `triggerNextStep`.
+The pipeline follows a linear execution path with internal retry loops for the AI generation phase. The process is designed to be resumable and state-aware via the `JobData` interface.
 
 ```mermaid
 graph TD
-    A["Start Job"] --> B["scanRepository"]
-    B --> C["planStructure"]
-    C --> D["writeSingleSection"]
-    D --> E["commitToGithub"]
-    D -- "Parallel Loop" --> D
-    E --> F["Pipeline Complete"]
+    A["GitHub Repo"] --> B["Scan & Sample"]
+    B --> C["Content Compression"]
+    C --> D["Throttled LLM"]
+    D --> E["Git Tree Commit"]
+    E --> F["Redis Cache Update"]
 ```
 
 ### Execution Sequence
 
-1.  **Repository Scanning (`scanRepository`)**:
-    *   Fetches the repository tree via Octokit.
-    *   Implements a round-robin sampling strategy: files are grouped by top-level directory, and a representative subset is selected to ensure broad coverage while staying within token limits.
-    *   Persists the file list to the `PipelineData` state in Redis.
-
-2.  **Structural Planning (`planStructure`)**:
-    *   Passes the sampled file tree to the LLM.
-    *   Generates a `TocEntry[]` array, defining the documentation hierarchy, target filenames, and the specific `relevant_files` required for each section.
-    *   Cleans up stale documentation files from previous indexing runs.
-
-3.  **Parallel Section Generation (`writeSingleSection`)**:
-    *   The pipeline spawns $N$ parallel workers (defined by `PIPELINE_CONCURRENCY`).
-    *   Each worker retrieves its assigned `TocEntry`, fetches the specific `relevant_files` content, and uses `repomix` to compress the code.
-    *   The LLM generates the MDX content for that specific section.
-    *   Results are stored in the `generatedFiles` map in Redis.
-
-4.  **VCS Commit (`commitToGithub`)**:
-    *   Aggregates all `generatedFiles`.
-    *   Performs a diff against the current `docsPath` in the repository.
-    *   Commits the final documentation set to the target branch in a single atomic operation.
+1.  **Repository Scanning & Sampling**: 
+    *   The system performs a recursive tree fetch of the default branch.
+    *   **Filtering**: Files are excluded based on size (>1MB), path patterns (e.g., `node_modules`, `dist`, `components/ui`), and non-code extensions.
+    *   **Balanced Sampling**: To avoid bias toward a single directory, the pipeline uses a round-robin sampling algorithm across directory groups, capping the total file count at 50.
+2.  **Token Compression**:
+    *   Raw file contents are passed through `repomix` with `compress: true`. This reduces whitespace and removes redundant characters to maximize the effective context window of the LLM.
+3.  **Throttled LLM Generation**:
+    *   The pipeline iterates through a prioritized list of Google Gemini models (`DOCS_MODELS`).
+    *   A global timestamp `lastApiCallTimestamp` ensures a minimum interval (`AI_THROTTLE_MS`) between requests.
+    *   **Retry Logic**: Implements exponential backoff for general errors and a hard 10-second wait for HTTP 429 (Too Many Requests) responses.
+4.  **Atomic Persistence**:
+    *   The system avoids high-level "commit" abstractions and instead manipulates the Git tree directly.
+    *   It calculates the diff between the current `main` branch tree and the new documentation set, creating a new tree and updating the `heads/main` reference.
 
 ## Implementation Deep Dive
 
-### Reliable LLM Interaction
-The pipeline abstracts LLM calls through a retry wrapper to handle the volatile nature of API rate limits (429s) and transient network failures.
+### Balanced Repository Sampling
+The `scanRepository` function implements a directory-aware sampling mechanism to ensure a representative slice of the codebase is extracted.
 
-```typescript title="server/src/ai.ts"
-export async function generateWithRetry({
-  systemPrompt,
-  prompt,
-  maxRetries = 3
-}: GenerateOptions): Promise<string> {
+```typescript title="server/src/services/githubService.ts"
+const groups: { [key: string]: RepoItem[] } = {};
+for (const file of relevantFiles) {
+  if (!file.path) continue;
+  const parts = file.path.split('/');
+  const dir = (parts.length > 1 ? parts[0] : '.') || '.';
+  if (!groups[dir]) groups[dir] = [];
+  groups[dir].push(file);
+}
+
+const sampledFiles: RepoItem[] = [];
+const dirs = Object.keys(groups);
+let index = 0;
+while (sampledFiles.length < 50 && dirs.length > 0) {
+  const currentDir = dirs[index % dirs.length];
+  if (!currentDir) {
+    dirs.splice(index % dirs.length, 1);
+    continue;
+  }
+  const file = (groups[currentDir] || []).shift();
+  if (file) {
+    sampledFiles.push(file);
+  } else {
+    dirs.splice(index % dirs.length, 1);
+    continue;
+  }
+  index++;
+}
+```
+**Mechanics:**
+- **Grouping**: Files are categorized by their top-level directory to prevent a single large directory (e.g., `src/utils`) from dominating the sample.
+- **Round-Robin Selection**: The `while` loop iterates through directory keys using modulo arithmetic (`index % dirs.length`), popping one file per directory until the 50-file limit is reached.
+- **Concurrency**: Once sampled, files are fetched using a worker pool (default concurrency: 10) to minimize I/O blocking.
+
+### Resilient LLM Orchestration
+The `generateWithRetry` function handles the volatility of LLM APIs through a multi-model fallback and throttling system.
+
+```typescript title="server/src/services/aiService.ts"
+for (const modelId of docsModels) {
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     try {
-      // Synchronous throttle reservation based on AI_THROTTLE_MS
-      await throttle(); 
-      const { text } = await generateText({
-        model: google('gemini-1.5-pro'),
+      const now = Date.now();
+      const targetTime = Math.max(now, lastApiCallTimestamp + MIN_INTERVAL_MS);
+      lastApiCallTimestamp = targetTime;
+
+      if (targetTime > now) {
+        const waitTime = targetTime - now;
+        const { promise, resolve } = Promise.withResolvers<void>();
+        setTimeout(resolve, waitTime);
+        await promise;
+      }
+
+      const result = await generateText({
+        model: google(modelId),
         system: systemPrompt,
         prompt: prompt,
       });
-      return text;
-    } catch (error: any) {
-      if (error.status === 429) {
-        // Hard wait for rate limit reset
-        await new Promise(resolve => setTimeout(resolve, 10000));
-      }
-      if (attempt === maxRetries - 1) throw error;
+      return result.text;
+    } catch (error: unknown) {
+      // ... error handling and backoff logic
     }
   }
-  throw new Error("Max retries exceeded");
 }
 ```
 **Mechanics:**
-*   **`throttle()`**: A module-level lock that ensures requests are spaced by `AI_THROTTLE_MS` (default 2000ms), effectively capping the request rate to 30 RPM.
-*   **Exponential Backoff/Hard Wait**: Specifically catches HTTP 429 errors to trigger a 10-second cooling period.
+- **Temporal Throttling**: Uses `Promise.withResolvers` to create a non-blocking wait period, ensuring the system never exceeds the `MIN_INTERVAL_MS` threshold.
+- **Model Fallback**: If the primary model (e.g., `gemma-4-31b-it`) fails after `maxRetries`, the loop moves to the next available model in the `DOCS_MODELS` array.
+- **Error Classification**: Specifically detects `429` status codes to trigger a longer, fixed-duration cooldown (10s) compared to the exponential backoff used for other errors.
 
-### Pipeline State Schema
-The pipeline's state is passed between asynchronous jobs via a `PipelineData` interface, serialized in Redis.
+### Low-Level Git Tree Persistence
+To ensure atomic updates to the documentation repository, GitDex manipulates the Git object database directly via the GitHub API.
 
-```typescript title="server/src/pipeline.ts"
-interface TocEntry {
-    prefix: string;
-    title: string;
-    filename: string;
-    description: string;
-    relevant_files: string[];
-}
+```typescript title="server/src/services/githubService.ts"
+const { data: newTree } = await octokit.rest.git.createTree({
+  owner: docsRepoOwner,
+  repo: docsRepo,
+  base_tree: commitData.tree.sha,
+  tree: [...deletions, ...newBlobs]
+});
 
-interface PipelineData {
-    files: { path: string; content: string }[];
-    toc: TocEntry[];
-    generatedFiles: { filename: string; content: string }[];
-    sectionsWritten: number;
-    defaultBranch?: string;
-}
+const { data: newCommit } = await octokit.rest.git.createCommit({
+  owner: docsRepoOwner,
+  repo: docsRepo,
+  message: `GitDex Index: ${job.owner}/${job.repo}`,
+  tree: newTree.sha,
+  parents: [refData.object.sha]
+});
+
+await octokit.rest.git.updateRef({
+  owner: docsRepoOwner,
+  repo: docsRepo,
+  ref: 'heads/main',
+  sha: newCommit.sha
+});
 ```
 **Mechanics:**
-*   **`relevant_files`**: A critical optimization that prevents the LLM from receiving the entire codebase for every section, instead providing only the files identified during the `planStructure` phase.
-*   **`sectionsWritten`**: An atomic counter used to determine when the parallel "Map" phase is complete and the pipeline can proceed to the "Reduce" (Commit) phase.
-
-### Orchestration Logic
-The `executeNextStep` function acts as the central dispatcher, determining which logic to run based on the current job state.
-
-```typescript title="server/src/pipeline.ts"
-export async function executeNextStep(jobId: string, sectionIndex?: number) {
-  const job = await queue.getJob(jobId);
-  const data = await queue.getData(jobId);
-
-  try {
-    if (!data.toc) {
-      await scanRepository(job, data);
-      await planStructure(job, data);
-    } else if (sectionIndex !== undefined) {
-      await writeSingleSection(job, data, sectionIndex);
-    } else if (data.sectionsWritten === data.toc.length) {
-      await commitToGithub(job, data);
-    }
-    
-    await triggerNextStep(job.id);
-  } catch (error: any) {
-    nextJobId = await queue.failJob(jobId, error.message);
-    // Isolation block to ensure the queue doesn't stall
-    await safelyTriggerNextJob(nextJobId);
-  }
-}
-```
-**Mechanics:**
-*   **Conditional Branching**: Checks for the existence of `data.toc` to decide between initial scanning or section generation.
-*   **State Completion**: The transition to `commitToGithub` is gated by the equality check `data.sectionsWritten === data.toc.length`.
-*   **Fault Tolerance**: The `failJob` mechanism ensures that a crash in one worker does not kill the entire pipeline, allowing for potential manual or automatic retries.
+- **Tree-Based Updates**: Instead of multiple commits, it calculates all `deletions` (files no longer present in the scan) and `newBlobs` (generated documentation) and applies them in a single `createTree` call.
+- **Reference Update**: The final `updateRef` call moves the `main` branch pointer to the new commit SHA, ensuring the update is atomic.
 
 ## Method / State Reference & Error Recovery
 
+### Redis State Schema
+
+| Key Pattern | Value Type | TTL | Purpose |
+| :--- | :--- | :--- | :--- |
+| `repo_exists:{owner}/{repo}` | `string` ("0"\|"1") | 300s - 3600s | Caches GitHub API repository existence checks to reduce API consumption. |
+| `last_indexed:{owner}/{repo}` | `string` (Timestamp) | $\infty$ | Tracks the last successful pipeline completion for a specific repository. |
+
 ### Environment Configuration
 
-| Variable | Default | Impact |
+| Variable | Default | Description |
 | :--- | :--- | :--- |
-| `AI_THROTTLE_MS` | `2000` | Milliseconds between LLM requests to prevent 429s. |
-| `PIPELINE_CONCURRENCY` | `4` | Number of parallel `writeSingleSection` workers triggered via QStash. |
+| `DOCS_MODELS` | `gemma-4-31b-it,...` | Comma-separated list of Google AI models for fallback. |
+| `AI_THROTTLE_MS` | `2000` | Minimum milliseconds between consecutive LLM requests. |
+| `DOCS_REPO_NAME` | `gitdex-docs` | The target GitHub repository where docs are persisted. |
+| `DOCS_REPO_OWNER` | `env.GITHUB_USERNAME` | The account owner of the documentation repository. |
 
 ### Failure Modes & Recovery
 
 | Failure Scenario | Detection | Recovery Mechanism |
 | :--- | :--- | :--- |
-| **LLM Rate Limit** | HTTP 429 | `generateWithRetry` implements a 10s wait and retry loop. |
-| **Token Overflow** | `js-tiktoken` limit | `scanRepository` uses round-robin sampling to truncate input size. |
-| **Worker Timeout** | QStash Timeout | `triggerNextStep` is called at the end of every execution to ensure continuity. |
-| **QStash Downtime** | Request failure | The `safelyTriggerNextJob` block attempts to re-queue the job in Redis to prevent state loss. |
-| **GitHub API Limit** | Octokit 403 | Pipeline fails the job and marks it for retry via `queue.failJob`. |
+| **LLM Rate Limit** | HTTP 429 / "429" in message | 10-second static wait $\rightarrow$ Retry loop. |
+| **Model Timeout** | `generateText` exception | Exponential backoff $\rightarrow$ Fallback to next model in `DOCS_MODELS`. |
+| **Compression Fail** | `repomix` try-catch block | Fallback to raw file content to prevent pipeline blockage. |
+| **Git Conflict** | `updateRef` failure | Pipeline fails; job state remains at `currentStep: 3`, allowing for manual or automatic retry. |

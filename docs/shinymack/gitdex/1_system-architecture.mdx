@@ -1,122 +1,127 @@
 ---
 title: "System Architecture"
-description: "High-level technical overview of the GitDex ecosystem, detailing the integration between the Next.js frontend and the Node.js backend orchestration layer."
+description: "High-level architectural overview, environment configurations, and deployment specifications."
 sidebar_position: 1
 ---
 # System Architecture
 
-GitDex is engineered as a decoupled, event-driven system designed to transform raw GitHub repositories into structured, AI-generated documentation. The architecture solves the primary constraint of serverless execution environments—strict request timeouts—by implementing an asynchronous orchestration layer powered by Upstash Redis and QStash.
+GitDex is engineered as a decoupled, asynchronous pipeline designed to transform raw GitHub repository structures into structured, AI-generated documentation. The architecture specifically addresses the constraints of serverless execution environments—namely, the strict request timeout limits—by implementing a distributed task orchestration layer using Upstash QStash and Redis.
 
-## System Role & Architectural Position
+### System Role & Architectural Position
 
-The ecosystem is bifurcated into a presentation layer (Client) and an orchestration layer (Server). The Client manages the user's interaction with the generated documentation and the AI chat interface, while the Server handles the computationally expensive and time-intensive process of repository analysis and LLM-driven content generation.
+The system is bifurcated into a high-performance rendering client and a stateless orchestration server. The server does not maintain long-lived connections for document generation; instead, it delegates execution to a message-driven pipeline.
 
-### Technical Stack Mapping
+#### Technical Specifications Matrix
 
-| Layer | Component | Technology | Primary Responsibility |
+| Component | Technology Stack | Primary Responsibility | Execution Context |
 | :--- | :--- | :--- | :--- |
-| **Frontend** | UI Framework | Next.js 16 (App Router) | Server-side rendering (SSR) of MDX and routing. |
-| **Frontend** | Doc Engine | Fumadocs | MDX processing, search indexing, and layout. |
-| **Frontend** | AI Interface | `assistant-ui` + AI SDK | Managed chat modality and streaming LLM responses. |
-| **Backend** | API Runtime | Node.js / Express | REST endpoint management and job triggering. |
-| **Backend** | Orchestration | Upstash QStash | Asynchronous task scheduling and timeout bypass. |
-| **Backend** | State Store | Upstash Redis | Job status tracking, concurrency locks, and caching. |
-| **Backend** | LLM Engine | Google Gemini | Codebase analysis and Markdown generation. |
-| **Integration** | Git Access | Octokit | Programmatic interaction with GitHub REST API. |
+| **Client** | Next.js, Fumadocs, Tailwind | MDX rendering, AI Chat UI, Dynamic Routing | Vercel Edge/Serverless |
+| **Server** | Node.js, Express, Bun | Job orchestration, LLM integration, GitHub API | Vercel Serverless |
+| **Queue** | Upstash QStash | Distributed scheduling, timeout bypass, retries | External SaaS |
+| **State Store** | Upstash Redis | Job tracking, token caching, indexing state | External SaaS |
+| **AI Engine** | Google Gemini | Repository analysis, TOC planning, content generation | External API |
+| **VCS Bridge** | Octokit | Source code extraction, Documentation commits | GitHub REST API |
 
-## Core Execution & Data Flow Mechanics
+---
 
-The GitDex pipeline utilizes a **Distributed Step-Execution** pattern. Instead of a single long-running process, the indexing workflow is decomposed into discrete, idempotent stages.
+### Core Execution & Data Flow Mechanics
 
-### Request Lifecycle Diagram
+To circumvent serverless timeout limits (typically 10-60s), GitDex employs a "Step-by-Step Execution" pattern. Rather than a single monolithic request, the documentation process is fragmented into discrete, idempotent tasks orchestrated by QStash.
+
+#### High-Level Orchestration Flow
 
 ```mermaid
 graph TD
-    C["Client"] -->|POST /index| S["Server"]
-    S -->|Init State| R["Redis"]
-    S -->|Schedule Job| Q["QStash"]
-    Q -->|Trigger Step| S
-    S -->|Fetch Code| G["GitHub API"]
-    S -->|Process| LLM["Gemini LLM"]
-    LLM -->|Generate MDX| S
-    S -->|Update State| R
-    S -->|Write Docs| G
-    C -->|Poll Status| S
+    C["Client App"] -->|Trigger Index| S["Express Server"]
+    S -->|Schedule Job| Q["QStash Queue"]
+    Q -->|Webhook Trigger| S
+    S -->|Read/Write State| R["Upstash Redis"]
+    S -->|Extract Code| G["GitHub API"]
+    S -->|Generate Content| AI["Gemini LLM"]
+    S -->|Commit Docs| G
+    G -->|Fetch MDX| C
 ```
 
-### Pipeline Execution Sequence
+#### Pipeline Execution Sequence
 
-1.  **Initialization**: The Client sends a repository identifier to the Server. The Server initializes a job record in Redis and schedules the first execution pulse via QStash.
-2.  **Analysis Phase**: The server retrieves the repository tree via Octokit. The LLM analyzes the structure to generate a comprehensive Table of Contents (ToC).
-3.  **Generation Phase**: The system iterates through the planned ToC, performing targeted code reads and generating MDX files for each section.
-4.  **Persistence**: Generated documentation is pushed back to the repository or a designated storage layer, ensuring the Client can render them via Fumadocs.
-5.  **State Synchronization**: Every step updates a Redis key (e.g., `job:{id}:status`) to allow the Client to provide real-time progress updates via polling.
+1.  **Initiation**: Client sends a request to the Server API with the target `owner/repo`.
+2.  **Job Scheduling**: Server initializes a job ID in Redis and schedules the first "Scan" task via QStash.
+3.  **Repository Indexing**: The server extracts the file tree and relevant source code using Octokit, storing the compressed codebase mapping in Redis.
+4.  **TOC Planning**: Gemini analyzes the codebase map to generate a structured Table of Contents (TOC).
+5.  **Incremental Generation**: The server iterates through the TOC, triggering individual QStash tasks for each page. Each task prompts Gemini to write a specific MDX file.
+6.  **Persistence**: Generated MDX files are committed directly to the designated GitHub documentation repository.
+7.  **Hydration**: The Client fetches the generated files from GitHub and renders them via Fumadocs.
 
-## Implementation Deep Dive
+---
 
-### Server Entry & Middleware
-The server must handle raw request bodies to validate QStash signatures, ensuring that indexing triggers originate only from the trusted orchestrator.
+### Implementation Deep Dive
 
-```typescript title="server/index.ts"
-import express, { Request, Response, NextFunction } from "express";
-import { Redis } from '@upstash/redis';
-import jobsRoutes from "./src/routes/jobsRoutes.js";
+#### Environment Configuration Schema
 
-const app = express();
-const redis = new Redis({ url: process.env.UPSTASH_REDIS_REST_URL, token: process.env.UPSTASH_REDIS_REST_TOKEN });
+The system relies on a strict set of environment variables to maintain connectivity between the serverless functions and the external state/queue providers.
 
-// CRITICAL: Capture the raw body BEFORE parsing JSON, so QStash signature verification works
-app.use((req, res, next) => {
-  let data = '';
-  req.setEncoding('binary');
-  req.on('data', (chunk) => { data += chunk; });
-  req.on('end', () => {
-    req.rawBody = data; 
-    next();
-  });
-});
-
-app.use(express.json());
-app.use("/api/jobs", jobsRoutes);
-```
-**Mechanics**:
-- **`req.rawBody`**: Preserves the exact byte sequence of the incoming request, which is mandatory for HMAC signature verification used by QStash.
-- **Middleware Ordering**: The raw body capture occurs before `express.json()`, preventing the body stream from being consumed by the JSON parser.
-
-### Client AI Integration
-The client leverages the Vercel AI SDK and `assistant-ui` to bridge the gap between the static documentation and the dynamic AI assistant.
-
-```typescript title="client/package.json"
-"dependencies": {
-    "@ai-sdk/google": "^3.0.83",
-    "@assistant-ui/react": "^0.11.58",
-    "@assistant-ui/react-ai-sdk": "^1.3.37",
-    "ai": "^6.0.208",
-    "fumadocs-ui": "^15.8.5"
+```typescript title="server/env.schema.ts"
+interface ServerEnv {
+  PORT: number; // Internal server port (3001)
+  CLIENT_URLS: string; // Allowed CORS origins
+  UPSTASH_REDIS_REST_URL: string; // Connection string for state store
+  UPSTASH_REDIS_REST_TOKEN: string; // Authentication token for Redis
+  QSTASH_TOKEN: string; // Authentication for message broker
+  BASE_URL: string; // Public tunnel URL for QStash webhooks
+  GITHUB_TOKEN: string; // PAT for repository access
+  GOOGLE_GENERATIVE_AI_API_KEY: string; // API Key for Gemini Pro
 }
 ```
-**Mechanics**:
-- **`@ai-sdk/google`**: Provides the provider-specific implementation for Gemini, enabling streaming responses to the UI.
-- **`assistant-ui`**: Decouples the chat UI components from the AI logic, allowing for a custom-themed, context-aware assistant integrated into the Fumadocs layout.
+*   `BASE_URL` is critical; it defines the endpoint where QStash sends HTTP POST requests to trigger the next step in the pipeline.
+*   `UPSTASH_REDIS_REST_URL` ensures state persistence across different serverless execution contexts.
 
-## Method / State Reference & Error Recovery
+#### Serverless Routing Configuration
 
-### Redis State Schema
+The server is deployed as a single-entry Express application on Vercel, requiring specific routing to ensure all requests are handled by the `index.ts` handler.
 
-The system maintains an ephemeral state in Redis to coordinate asynchronous tasks across serverless instances.
+```json title="server/vercel.json"
+{
+  "version": 2,
+  "builds": [
+    {
+      "src": "index.ts",
+      "use": "@vercel/node"
+    }
+  ],
+  "routes": [
+    {
+      "src": "/(.*)",
+      "dest": "index.ts",
+      "headers": {
+        "Cache-Control": "no-store, must-revalidate"
+      }
+    }
+  ]
+}
+```
+*   `src: "/(.*)"`: Maps all incoming traffic to the Express app.
+*   `Cache-Control: no-store`: Prevents Vercel's Edge Network from caching API responses, ensuring the client always sees the latest job status from Redis.
 
-| Key Pattern | Data Type | Purpose | Expiry (TTL) |
+---
+
+### Method / State Reference & Error Recovery
+
+#### Redis State Architecture
+
+The system utilizes Redis as a distributed state machine to track the progress of documentation jobs.
+
+| Key Pattern | Data Type | Purpose | TTL |
 | :--- | :--- | :--- | :--- |
-| `job:{jobId}:status` | `string` | Current phase (`PLANNING`, `WRITING`, `COMPLETED`). | 24 Hours |
-| `job:{jobId}:progress` | `number` | Percentage of documentation completed. | 24 Hours |
-| `lock:{repoPath}` | `string` | Mutex to prevent concurrent indexing of the same repo. | 1 Hour |
-| `cooldown:{repoPath}` | `string` | Rate-limiting flag to prevent rapid re-indexing loops. | 15 Mins |
+| `job:{id}:status` | String | Current pipeline phase (`indexing`, `planning`, `writing`, `completed`) | 24h |
+| `job:{id}:toc` | JSON | The generated Table of Contents structure | 24h |
+| `job:{id}:progress` | Integer | Percentage of TOC pages completed | 24h |
+| `repo:{owner}:{repo}:map` | String | Compressed representation of the codebase for LLM context | 7d |
 
-### Failure Modes & Recovery
+#### Failure Modes & Recovery Logic
 
 | Failure Scenario | Detection Mechanism | Recovery Strategy |
 | :--- | :--- | :--- |
-| **LLM Timeout** | QStash Delivery Failure | Exponential backoff retry managed by QStash. |
-| **GitHub Rate Limit** | Octokit `403 Forbidden` | Job is paused; state is saved to Redis; retry scheduled after reset window. |
-| **Partial Indexing** | Redis status $\neq$ `COMPLETED` | Client allows "Resume" operation, picking up from the last successful ToC entry. |
-| **Zombied Locks** | TTL Expiration | Redis key expiration automatically releases the `lock:{repoPath}`, allowing new indexing requests. |
+| **LLM Rate Limit** | HTTP 429 from Gemini API | QStash exponential backoff retry policy. |
+| **GitHub API Throttling** | Octokit `RateLimitError` | Job suspension; reschedule next step with delay. |
+| **Serverless Timeout** | Execution termination | QStash identifies missing ACK and redelivers the payload. |
+| **Invalid Repo Path** | Octokit HTTP 404 | Terminal state update in Redis (`status: failed`). |

@@ -1,169 +1,151 @@
 ---
 title: "Task Queue Orchestration"
-description: "Implementation details of the asynchronous job queue, indexing state management, and worker controllers."
+description: "Distributed task scheduling using Qstash and internal queue services for asynchronous job processing."
 sidebar_position: 2.2
 ---
 # Task Queue Orchestration
 
-## System Role & Architectural Position
+## Section A: System Role & Architectural Position
 
-The Task Queue Orchestration layer serves as the asynchronous execution backbone of GitDex. Its primary responsibility is to manage the lifecycle of repository indexing jobs, ensuring that LLM-intensive processing pipelines do not overwhelm system resources or exceed API rate limits. 
+The Task Queue Orchestration layer provides a distributed, asynchronous execution framework designed to handle long-running repository analysis pipelines. Because LLM-driven documentation generation exceeds standard HTTP timeout limits (especially in serverless environments), GitDex decouples job submission from execution using a hybrid approach: a local Redis-backed state machine for job tracking and Upstash QStash for reliable, delayed, and distributed event triggering.
 
-The system employs a **Strict Serialization** model, where only one active indexing job is processed globally at any given time, while subsequent requests are queued in a FIFO (First-In-First-Out) manner. This is achieved through a combination of Upstash Redis for state persistence and locking, and Upstash QStash for reliable webhook-based job triggering.
+The orchestrator manages the lifecycle of a `JobData` object, transitioning it through discrete pipeline steps while enforcing concurrency limits and preventing duplicate processing of the same repository.
 
-### Core Component Specifications
+### Architectural Specifications
 
-| Component | Technology | Primary Responsibility | Key Constraint |
+| Component | Technology | Responsibility | Key Configuration / Variable |
 | :--- | :--- | :--- | :--- |
-| `SimpleQueue` | Upstash Redis | Job state tracking, lock management, and queue persistence. | Atomic state transitions via Redis. |
-| `jobsController` | Node.js/Express | Request validation, job initiation, and status polling. | GitHub API rate limit compliance. |
-| `QStash` | Upstash QStash | Asynchronous job triggering and retry logic. | Signature-verified webhook delivery. |
-| `Pipeline` | Node.js | Sequential execution of indexing steps. | Idempotent step execution. |
+| **State Store** | Redis | Job metadata, locking, and queueing | `system:active_job`, `system:queue` |
+| **Message Broker** | QStash | Asynchronous step triggering & retries | `QSTASH_TOKEN`, `BASE_URL` |
+| **Security** | HMAC/Signing | Validating inbound QStash webhooks | `QSTASH_CURRENT_SIGNING_KEY` |
+| **Concurrency** | Redis NX Locks | Preventing race conditions in fan-out | `PIPELINE_CONCURRENCY` |
+| **Rate Limiting** | Cooldown Key | Preventing rapid re-indexing | `COOLDOWN_MS` (1 hour) |
 
-## Core Execution & Data Flow Mechanics
+---
 
-The orchestration flow follows a rigid state machine to prevent race conditions and duplicate indexing of the same repository.
+## Section B: Core Execution & Data Flow Mechanics
 
-### Job Lifecycle Workflow
+The orchestration follows a "Fan-out/Fan-in" pattern. A single job is initiated, then split into multiple concurrent worker tasks (writing sections), and finally consolidated before the final commit.
+
+### Pipeline Execution Flow
 
 ```mermaid
 graph TD
-    A["User Request"] --> B["verifyRepoExists"]
-    B --> C["addJob (Redis)"]
-    C --> D{"Is Job Active?"}
-    D -- "No" --> E["triggerNextJob"]
-    D -- "Yes" --> F["Queue (FIFO)"]
-    E --> G["QStash Webhook"]
-    G --> H["executeNextStep"]
-    H --> I["updateJob State"]
-    I --> J{"Completed?"}
-    J -- "No" --> H
-    J -- "Yes" --> K["completeJob"]
-    K --> E
+    A["Client Request"] --> B["SimpleQueue.addJob"]
+    B --> C{"Active Job?"}
+    C -- "Yes" --> D["system:queue"]
+    C -- "No" --> E["system:active_job"]
+    E --> F["QStash Trigger"]
+    F --> G["executeNextStep"]
+    G --> H{"Current Step?"}
+    H -- "0: Scan" --> I["Scan Repo"]
+    H -- "1: Plan" --> J["Generate TOC"]
+    H -- "2: Write" --> K["Fan-out Sections"]
+    H -- "3: Commit" --> L["GitHub Commit"]
+    K --> M["Redis Section Hash"]
+    M --> N{"All Done?"}
+    N -- "Yes" --> L
+    L --> O["Job Completed"]
 ```
 
-### Execution Invariants
-*   **Unique Job Identification**: Jobs are keyed by a deterministic ID derived from the `owner` and `repo` names to prevent duplicate concurrent entries for the same repository.
-*   **Distributed Locking**: A two-layer lock mechanism is used:
-    1.  **Redis Lock Key**: A high-level key with a 1-hour TTL to prevent redundant job creation.
-    2.  **Job State**: A `processing` state that acts as a mutex for the pipeline.
-*   **Atomic Step Control**: Granular `StepLocks` (60s TTL) are acquired before executing specific pipeline segments, ensuring that server crashes do not leave the system in a permanently locked state.
+### Key Execution Invariants
+*   **Mutual Exclusion**: Only one job can be marked as `system:active_job` at a time to preserve system resources.
+*   **Step-Level Locking**: In Step 2 (Writing Sections), `acquireStepLock` uses Redis `SET NX` to ensure that a specific section index is not processed by multiple QStash retries simultaneously.
+*   **State Persistence**: All pipeline data (`PipelineData`) is serialized to JSON and stored in a Redis Hash (`job:{owner}/{repo}`), allowing the pipeline to resume across different serverless execution contexts.
+*   **Local Development Fallback**: The `qstashService` detects `localhost` targets and bypasses the external QStash API, using direct `fetch` calls to simulate asynchronous triggers.
 
-## Implementation Deep Dive
+---
 
-### State Schema and Job Definition
-The system utilizes a strongly typed `JobData` interface to maintain consistent state across Redis and the API layer.
+## Section C: Implementation Deep Dive & Code Snippets
 
-```typescript title="server/src/queue.ts"
-export type JobState = 'queued' | 'processing' | 'completed' | 'failed';
+### 1. Distributed Triggering with QStash
+The `triggerNextStep` function acts as the bridge between the internal state machine and the external execution trigger. It supports delayed execution to prevent LLM rate-limiting.
 
-export interface JobData {
-    id: string;
-    state: JobState;
-    repoUrl: string;
-    owner: string;
-    repo: string;
-    createdAt: number;
-    updatedAt: number;
-    error?: string | null;
-    currentStep: number;
-    data?: string | null;
+```typescript title="server/src/services/qstashService.ts"
+export async function triggerNextStep(jobId: string, sectionIndex?: number, delay?: number): Promise<void> {
+  const baseUrl = getBaseUrl();
+  const targetUrl = `${baseUrl.replace(/\/$/, '')}/api/pipeline/step`;
+
+  // ... local dev check omitted ...
+
+  await qstash.publishJSON({
+    url: targetUrl,
+    body: { jobId, sectionIndex },
+    delay: delay ? delay : undefined,
+  });
 }
 ```
-*   `currentStep`: An integer pointer used by the `executeNextStep` logic to resume pipelines.
-*   `updatedAt`: A timestamp used by the self-healing mechanism to detect "stuck" jobs.
+**Mechanics**:
+- **`publishJSON`**: Dispatches a POST request to the `/api/pipeline/step` endpoint.
+- **`delay`**: Implements a staggered start for concurrent workers (e.g., `i * stepDelaySec`) to smooth out burst traffic to AI providers.
+- **`sectionIndex`**: Passed as part of the payload to identify which specific part of the TOC is being generated.
 
-### Queue Management & Serialization logic
-The `addJob` method implements the logic for determining whether a job should start immediately or be queued.
+### 2. Job State Management & Cooldowns
+The `SimpleQueue` class manages the transition of jobs and implements a cooldown mechanism to prevent API abuse.
 
-```typescript title="server/src/queue.ts"
-async addJob(repoUrl: string, force = false): Promise<string> {
-    const { owner, repo } = parseOwnerRepo(repoUrl);
-    const jobId = this.getJobId(owner, repo);
-    
-    // Layer 1: Check Redis lock key (1h TTL)
-    const lockKey = this.getLockKey(owner, repo);
-    const isLocked = await redis.get(lockKey);
-    
-    if (!force && isLocked) {
-        // Job exists or is recently processed; return existing ID
-        return jobId;
+```typescript title="server/src/services/queueService.ts"
+const lockKey = this.getLockKey(owner, repo);
+const COOLDOWN_MS = 60 * 60 * 1000;
+
+const lastIndexed = await redis.get<string>(lockKey);
+if (lastIndexed && !force) {
+    const timePassed = Date.now() - parseInt(lastIndexed);
+    if (timePassed < COOLDOWN_MS) {
+        throw new Error(`Repository is in cooldown...`);
     }
-
-    // Create job metadata
-    const job: JobData = {
-        id: jobId,
-        state: 'queued',
-        repoUrl, owner, repo,
-        createdAt: Date.now(),
-        updatedAt: Date.now(),
-        currentStep: 0
-    };
-
-    await redis.set(jobId, JSON.stringify(job));
-    await redis.set(lockKey, 'locked', { ex: 3600 });
-    
-    // STRICT SERIALIZATION: Only one active job globally
-    const activeJob = await redis.get('active_job');
-    if (!activeJob) {
-        await this.triggerNextJob();
-    } else {
-        await redis.lpush('job_queue', jobId);
-    }
-    
-    return jobId;
 }
 ```
-**Mechanics:**
-1.  **Idempotency**: Uses `getLockKey` to bypass redundant requests.
-2.  **Concurrency Control**: Checks for the `active_job` key. If null, the current job is promoted to active and triggered via QStash. Otherwise, it is pushed to the `job_queue` list.
-3.  **Persistence**: Both the job metadata (Hash/String) and the queue (List) are stored in Redis.
+**Mechanics**:
+- **Cooldown Check**: Uses a Redis key `lock:{owner}/{repo}` to store the timestamp of the last successful index.
+- **`nx: true`**: When adding a job, a temporary `lock:add:...` key is used to prevent "double-submit" race conditions during the initial request.
+- **Active Job Pointer**: `system:active_job` acts as a mutex for the primary pipeline execution.
 
-### Step Locking Mechanism
-To ensure that a single step is not executed multiple times during a timeout or retry, the system implements a transient step lock.
+### 3. Signature Verification Middleware
+To prevent unauthorized triggerings of the pipeline, the `verifyQstashSignature` middleware ensures that only requests signed by Upstash are processed.
 
-```typescript title="server/src/queue.ts"
-async acquireStepLock(jobId: string, sectionIndex?: number): Promise<boolean> {
-    const lockKey = `lock:step:${jobId}:${sectionIndex ?? 0}`;
-    // Set lock with a 60-second TTL
-    const acquired = await redis.set(lockKey, 'locked', {
-        nx: true, 
-        ex: 60 
-    });
-    return acquired === 'OK';
-}
+```typescript title="server/src/middleware/verifyQstash.ts"
+export const verifyQstashSignature = async (req: RequestWithRawBody, res: Response, next: NextFunction) => {
+  const signature = req.headers['upstash-signature'];
+  const body = req.rawBody || JSON.stringify(req.body);
+  
+  const isValid = await qstashReceiver.verify({
+    signature: headerSig,
+    body,
+  });
+
+  if (!isValid) return res.status(401).json({ error: 'Invalid QStash signature' });
+  next();
+};
 ```
-**Mechanics:**
-*   `nx: true`: Ensures the key is only set if it does not already exist (Atomic Set-if-Not-Exists).
-*   `ex: 60`: Automatically expires the lock after 60 seconds, allowing the system to recover if the worker process dies mid-step.
+**Mechanics**:
+- **`rawBody`**: Requires the exact raw string body for HMAC verification, as `JSON.stringify(req.body)` may alter spacing and invalidate the signature.
+- **`qstashReceiver`**: Utilizes `currentSigningKey` and `nextSigningKey` to support zero-downtime key rotation.
 
-## Method / State Reference & Error Recovery
+---
 
-### Job State Transitions
+## Section D: Method / State Reference & Error Recovery
 
-| From State | Event | To State | Trigger |
+### Redis Data Structure Reference
+
+| Key Pattern | Type | Purpose | TTL |
 | :--- | :--- | :--- | :--- |
-| `null` | `addJob()` | `queued` | API Request $\rightarrow$ Redis `lpush` |
-| `queued` | `triggerNextJob()` | `processing` | QStash Webhook $\rightarrow$ `executeNextStep` |
-| `processing` | `completeJob()` | `completed` | Pipeline Final Step $\rightarrow$ `redis.del(active_job)` |
-| `processing` | `failJob()` | `failed` | Exception $\rightarrow$ `redis.set(state: 'failed')` |
-| `failed` | `requeueJob()` | `queued` | Admin/System Recovery $\rightarrow$ `redis.lpush` (Front) |
+| `job:{owner}/{repo}` | Hash | Stores `JobData` (state, currentStep, data) | 24 Hours |
+| `lock:{owner}/{repo}` | String | Cooldown timestamp for the repository | 1 Hour |
+| `lock:step:{jobId}:{idx}` | String | Mutex for concurrent section writing | 60 Seconds |
+| `system:active_job` | String | Pointer to the currently executing Job ID | N/A |
+| `system:queue` | List | FIFO queue of Job IDs waiting for execution | N/A |
+
+### Job State Transition Matrix
+
+| State | Transition Trigger | Next State | Condition |
+| :--- | :--- | :--- | :--- |
+| `queued` | `triggerNextJob()` | `processing` | `system:active_job` is empty |
+| `processing` | `completeJob()` | `completed` | All pipeline steps $\in [0, 3]$ finish |
+| `processing` | `failJob()` | `failed` | Uncaught exception or timeout |
+| `failed` | `requeueJob()` | `queued` | Manual or automated retry |
 
 ### Error Recovery & Self-Healing
-The system implements a "Heal" mechanism to prevent the queue from stalling due to orphaned `processing` states.
-
-1.  **Stuck Job Detection**: The `healStuckJobs` method (and `getJob` global check) compares the `updatedAt` timestamp of the active job against a `COOLDOWN_MS` (1 hour) threshold.
-2.  **Automatic Re-queuing**: If a job is found to be stuck:
-    *   The `active_job` lock is released.
-    *   The job state is reset to `queued`.
-    *   The job is pushed to the front of the queue to ensure priority recovery.
-3.  **GitHub Verification**: The `getStatusByName` controller implements a "cache-miss" check. Instead of relying solely on Redis, it verifies the existence of the indexed files directly on GitHub via Octokit to reconcile the database state with actual storage.
-
-### API Contract: Job Management
-
-| Endpoint | Method | Parameter | Description |
-| :--- | :--- | :--- | :--- |
-| `/jobs/create` | `POST` | `repoUrl` | Initializes indexing and enters queue. |
-| `/jobs/status/:id` | `GET` | `id` | Returns `JobData` including `currentStep`. |
-| `/jobs/status/name` | `GET` | `owner`, `repo` | Verifies indexing status via GitHub API. |
-| `/jobs/heal` | `POST` | N/A | Manually triggers `healStuckJobs()` recovery. |
+The system implements three layers of fault tolerance:
+1.  **The Stuck Job Monitor (`healStuckJobs`)**: A cron-like function that checks if `system:active_job` has not been updated for > 15 minutes. If detected, it calls `failJob()` to clear the mutex and allow the queue to progress.
+2.  **Step-Level Retries**: QStash automatically retries failed HTTP 5xx responses. The `acquireStepLock` ensures that these retries do not create duplicate content in Redis.
+3.  **Critical Trigger Recovery**: If `triggerNextStep` fails during a job transition, `requeueJob()` is called to push the job back to the front of the `system:queue`, resetting the `currentStep` to 0 to ensure a clean state.

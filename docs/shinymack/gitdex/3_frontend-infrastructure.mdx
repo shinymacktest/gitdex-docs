@@ -1,78 +1,58 @@
 ---
 title: "Frontend Infrastructure"
-description: "The foundational architecture of the client application, including global styles, font optimization, and root layouts."
+description: "Core client-side framework, global styling, and application layout configurations."
 sidebar_position: 3
 ---
 # Frontend Infrastructure
 
+The Frontend Infrastructure of GitDex is engineered as a high-performance, type-safe single-page application (SPA) utilizing Next.js 16 with the App Router architecture. It serves as the primary orchestration layer for AI-driven repository exploration, combining a documentation engine (Fumadocs) with a complex AI interaction layer (@assistant-ui). The infrastructure is optimized for low-latency updates, GPU-accelerated visualizations, and strict theme consistency across light and dark modes.
+
 ## System Role & Architectural Position
 
-The Frontend Infrastructure serves as the foundational execution environment for the GitDex client. It establishes the global design system, optimizes asset delivery, and defines the root composition of the React component tree. This layer is responsible for eliminating Cumulative Layout Shift (CLS), managing theme state persistence, and providing the CSS utility framework required by the AI Experience Layer.
+The frontend operates as the presentation and client-side state management layer, interfacing with the Backend Core Engine via a secure proxy layer. It leverages Turbopack for optimized build times and utilizes React 19's concurrent rendering capabilities to handle heavy AI data streams without blocking the main UI thread.
 
-The infrastructure is positioned as the outermost shell of the Next.js App Router architecture, wrapping all page segments in a unified provider hierarchy.
+### Core Technical Specifications
 
-### Infrastructure Specifications
-
-| Component | Technology | Purpose | Critical Invariant |
+| Component | Technology | Version | Primary Responsibility |
 | :--- | :--- | :--- | :--- |
-| **Styling Engine** | Tailwind CSS v4+ | Utility-first styling & Theme variables | Zero runtime CSS overhead |
-| **Font Optimization** | `next/font/local` | Localized font loading & swapping | No FOIT (Flash of Invisible Text) |
-| **Theme Orchestration** | `next-themes` | Dark/Light mode state management | Synchronous hydration of `.dark` class |
-| **UI Framework** | `fumadocs-ui` | Documentation-centric primitive components | Strict adherence to `RootProvider` context |
-| **Notification System** | `sonner` | Global toast event orchestration | Singleton instance in `RootLayout` |
+| **Framework** | Next.js | 16.2.9 | App Routing, SSR/SSG, and Turbopack orchestration. |
+| **UI Primitive** | Radix UI / Shadcn | 1.x | Accessible, unstyled component primitives. |
+| **Styling** | Tailwind CSS | 4.3.1 | Utility-first CSS with JIT engine and CSS variable mapping. |
+| **AI SDK** | Vercel AI SDK | 6.0.208 | Stream management, tool calling, and LLM integration. |
+| **Doc Engine** | Fumadocs | 15.8.5 | MDX processing, search indexing, and documentation layouts. |
+| **State Mgmt** | Zustand | 5.0.14 | Lightweight, atomic client-side state synchronization. |
+| **Visualization** | Three.js / Mermaid | 0.167.1+ | 3D repository mapping and dynamic flow-chart rendering. |
 
 ## Core Execution & Data Flow Mechanics
 
-The frontend boot sequence follows a strict linear dependency chain to ensure that styles and fonts are available before the first paint of the AI interface.
+The application boot sequence prioritizes the injection of global design tokens and the initialization of context providers to prevent Layout Shift (CLS) and Flash of Unstyled Content (FOUC).
 
-### Bootstrapping Sequence
+### Provider Hierarchy and Initialization
+
+The `RootLayout` implements a nested provider pattern to ensure that theme, documentation, and notification states are available to all child components.
 
 ```mermaid
 graph TD
-    A["Browser Request"] --> B["Next.js Server Rendering"]
-    B --> C["Font Manifest Resolution"]
-    C --> D["CSS Layer Injection"]
-    D --> E["ThemeProvider Hydration"]
-    E --> F["RootProvider Initialization"]
-    F --> G["Children Component Tree"]
+    A["RootLayout"] --> B["ThemeProvider"]
+    B --> C["RootProvider (Fumadocs)"]
+    C --> D["Page Component"]
+    D --> E["AI Experience Layer"]
+    D --> F["Doc Content Render"]
+    C --> G["Toaster (Sonner)"]
 ```
 
-### Key Technical Mechanics
-
-*   **Font Optimization Pipeline**: By utilizing `next/font/local`, GitDex bypasses external network requests for typography. The `MozillaHeadline` and `MozillaText` fonts are pre-loaded and injected via CSS variables, ensuring the browser can calculate layout dimensions before the JS bundle executes.
-*   **CSS Cascade Layering**: The system employs `@layer base` and `@theme inline` directives to manage specificity. The `@source` directive integrates `fumadocs-ui` styles directly into the build pipeline, preventing style collisions between the core UI library and custom GitDex animations.
-*   **Theming Lifecycle**: `ThemeProvider` manages the `class` attribute on the `<html>` element. This enables the CSS engine to toggle between light and dark variable sets (e.g., `.dark .bg-grid-pattern`) without triggering a full page re-render.
-*   **Visual Effects Engine**: Complex backgrounds (Aurora, Grid, Dots) are implemented as GPU-accelerated CSS animations to maintain 60fps performance while providing a high-fidelity "AI" aesthetic.
+### Execution Pipeline
+1.  **Font Injection**: Local variable fonts (`MozillaHeadline`, `MozillaText`) are loaded via `next/font/local` and mapped to CSS variables `--font-mzh` and `--font-mzt`.
+2.  **Theme Resolution**: `next-themes` intercepts the system preference or local storage setting to apply the `.dark` class to the `<html>` element before hydration.
+3.  **Context Wrapping**: `RootProvider` initializes the Fumadocs search and navigation state, while the `ThemeProvider` synchronizes the CSS variable palette.
+4.  **Hydration**: React 19 hydrates the DOM, applying the `suppressHydrationWarning` attribute to the `html` tag to mitigate discrepancies between server-side theme defaults and client-side preferences.
 
 ## Implementation Deep Dive
 
-### Typography Optimization
+### Root Layout Orchestration
+The `RootLayout` defines the global HTML shell and ensures that critical CSS (KaTeX for mathematical notation and global styles) is loaded before the component tree.
 
-The system leverages Next.js local font loading to prevent layout shifts and ensure brand consistency.
-
-```typescript title="client/src/app/fonts.ts"
-import localFont from 'next/font/local'
-
-export const MozillaHeadline = localFont({
-  src: './fonts/MozillaHeadline.woff2', // Path to optimized woff2 binary
-  variable: '--font-mozilla-headline',
-})
-
-export const MozillaText = localFont({
-  src: './fonts/MozillaText.woff2',
-  variable: '--font-mozilla-text',
-})
-```
-
-**Technical Analysis:**
-- `variable` property: Defines a CSS custom property that allows Tailwind to reference the font via `font-family: var(--font-mozilla-headline)`.
-- `woff2` format: Used for maximum compression and browser compatibility.
-
-### Root Layout Composition
-
-The `RootLayout` serves as the dependency injection point for global state and providers.
-
-```tsx title="client/src/app/layout.tsx"
+```typescript title="client/src/app/layout.tsx"
 export default function RootLayout({
   children,
 }: {
@@ -80,9 +60,17 @@ export default function RootLayout({
 }) {
   return (
     <html lang="en" suppressHydrationWarning>
-      <body className={`${MozillaHeadline.variable} ${MozillaText.variable} antialiased`}>
-        <ThemeProvider attribute="class" defaultTheme="system" enableSystem>
-          <RootProvider>
+      <body className={` ${MozillaHeadline.variable} ${MozillaText.variable}`}>
+        <ThemeProvider
+          attribute="class"
+          defaultTheme="system"
+          enableSystem
+          disableTransitionOnChange
+        >
+          <RootProvider
+            search={{
+              enabled: false 
+            }}>
             {children}
             <Toaster />
           </RootProvider>
@@ -92,54 +80,79 @@ export default function RootLayout({
   );
 }
 ```
+*   **`suppressHydrationWarning`**: Prevents React from throwing errors when `next-themes` modifies the class attribute of the `html` element on the client.
+*   **`MozillaHeadline.variable`**: Injects a CSS variable class that allows Tailwind to reference the local font via `var(--font-mzh)`.
+*   **`RootProvider`**: Configures the Fumadocs environment; the `search: { enabled: false }` flag indicates that search indexing is handled via a custom implementation rather than the default provider.
 
-**Technical Analysis:**
-- `suppressHydrationWarning`: Required for `next-themes` to prevent mismatches between server-rendered HTML and client-side theme detection.
-- `antialiased`: Applies `-webkit-font-smoothing: antialiased` to optimize font rendering across macOS/Windows.
-- `RootProvider`: Initializes the `fumadocs-ui` context, providing necessary state for documentation navigation and search.
-
-### Advanced Visual Infrastructure
-
-The `globals.css` file implements complex GPU-accelerated animations for the background layer.
+### Design Token System
+GitDex employs a CSS-variable-first approach to styling, utilizing Tailwind 4's `@theme inline` directive to map system variables to utility classes.
 
 ```css title="client/src/app/globals.css"
-.animate-aurora-slow-1 {
-  animation: aurora-slow-1 20s linear infinite;
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --color-primary: var(--primary);
+  --color-primary-foreground: var(--primary-foreground);
+  /* ... other mappings */
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+  --font-serif: var(--font-serif);
 }
 
-.bg-grid-pattern {
-  background-image: linear-gradient(to right, #80808012 1px, transparent 1px),
-                    linear-gradient(to bottom, #80808012 1px, transparent 1px);
-  background-size: 40px 40px;
-}
-
-.dark .bg-grid-pattern {
-  background-image: linear-gradient(to right, #ffffff05 1px, transparent 1px),
-                    linear-gradient(to bottom, #ffffff05 1px, transparent 1px);
+@layer base {
+  * {
+    @apply border-border outline-ring/50;
+  }
+  body {
+    @apply bg-background text-foreground;
+  }
+  h1, h2, h3, h4, h5, h6 {
+    font-family: var(--font-mzh), sans-serif;
+  }
 }
 ```
+*   **`@theme inline`**: Directly binds CSS variables to Tailwind's internal design system, enabling classes like `bg-primary` to dynamically resolve to the current theme's value.
+*   **`@layer base`**: Ensures that global resets and typography (specifically using the Mozilla Headline font for headings) are applied consistently across the application.
+*   **Border/Ring Logic**: All elements are defaulted to `border-border` and `outline-ring/50` for visual consistency during focus and active states.
 
-**Technical Analysis:**
-- `linear-gradient`: Used to create high-performance mathematical grids instead of image assets, reducing HTTP requests and memory usage.
-- `.dark` override: Re-calculates alpha transparency for grid lines to maintain contrast in dark mode.
-- `aurora-slow` animations: Utilize `transform` or `opacity` shifts to ensure they stay on the compositor thread.
+### Font Resource Management
+Variable fonts are managed as local assets to eliminate external network dependencies and optimize Largest Contentful Paint (LCP).
 
-## Reference & Error Recovery
+```typescript title="client/src/app/fonts.ts"
+import localFont from 'next/font/local'
 
-### Theme Configuration Mapping
+export const MozillaHeadline = localFont({
+  src: '/MozillaHeadline-VariableFont_wdth,wght.ttf',
+  variable: '--font-mzh',
+  display: 'swap',
+})
 
-| Variable / Class | Light Mode Value | Dark Mode Value | CSS Impact |
+export const MozillaText = localFont({
+  src: '/MozillaText-VariableFont_wght.ttf',
+  variable: '--font-mzt',
+  display: 'swap',
+})
+```
+*   **`variable`**: Defines the CSS variable name that is appended to the `body` class list in `layout.tsx`.
+*   **`display: 'swap'`**: Instructs the browser to use a fallback font until the variable font is fully loaded, preventing invisible text.
+
+## Method / State Reference & Error Recovery
+
+### Global Theme Token Map
+
+The following tokens are used to drive the UI's appearance across different modes.
+
+| Token | Light Mode Value | Dark Mode Value | Usage |
 | :--- | :--- | :--- | :--- |
-| `.dark` | N/A | `active` | Switches all `@theme` variables |
-| `.bg-grid-pattern` | `#80808012` | `#ffffff05` | Background grid line color |
-| `MozillaHeadline` | `--font-mozilla-headline` | `--font-mozilla-headline` | Global Heading Font |
-| `MozillaText` | `--font-mozilla-text` | `--font-mozilla-text` | Global Body Font |
+| `--background` | `#ffffff` | `#09090b` | Primary page background. |
+| `--foreground` | `#09090b` | `#fafafa` | Primary text color. |
+| `--primary` | `#059669` | `#10b981` | Brand accent / CTA elements. |
+| `--border` | `#d4d4d8` | `#3f3f46` | Component boundaries/dividers. |
+| `--ring` | `#059669` | `#10b981` | Focus indicators and active states. |
+| `--muted` | `#f4f4f5` | `#18181b` | De-emphasized backgrounds. |
 
-### Failure Modes & Recovery
+### Error Recovery & Invariants
 
-| Failure Mode | Symptom | Root Cause | Resolution |
-| :--- | :--- | :--- | :--- |
-| **Font Flash** | Text jumps from Serif to Sans | Font file load latency | Ensure `next/font/local` is used in `RootLayout` |
-| **Theme Flicker** | White flash on dark mode load | Hydration mismatch | Add `suppressHydrationWarning` to `<html>` tag |
-| **Animation Lag** | Stuttering aurora background | Main thread congestion | Move animation properties to `transform` or `opacity` |
-| **Style Collision** | UI components ignoring styles | Specificity conflict | Wrap custom styles in `@layer base` or `@layer components` |
+*   **Hydration Mismatch**: If a theme mismatch occurs between the server (defaulting to 'system') and the client (stored in `localStorage`), `next-themes` performs a DOM mutation before the first paint. The `suppressHydrationWarning` attribute on `<html>` prevents this from triggering a React reconciliation error.
+*   **CSS Variable Fallbacks**: Tailwind 4 configuration includes fallback values within the `@theme` block. If a CSS variable is undefined, the system reverts to the hardcoded HSL/HEX values defined in the `:root` or `.dark` selectors.
+*   **Font Loading Failure**: The `font-family` declarations in `globals.css` include `sans-serif` fallbacks. If the `.ttf` assets fail to load, the browser defaults to the system sans-serif stack without breaking the layout.

@@ -1,0 +1,162 @@
+---
+title: "Delivery & UI Layer"
+description: "Implementation of the presentation layer, user input capture, and recommendation result visualization."
+sidebar_position: 1.1
+---
+# Delivery & UI Layer
+
+The Delivery & UI Layer serves as the decoupled interface between the end-user and the recommendation backend. It consists of a **Streamlit** presentation frontend and a **FastAPI** orchestration layer. This layer is responsible for managing user session state, routing requests to the Recommendation Logic Engine, and aggregating data from both local TF-IDF models and the external TMDB (The Movie Database) API for rich metadata visualization.
+
+### System Role & Architectural Position
+
+This layer implements the "Backend-for-Frontend" (BFF) pattern via the FastAPI server, ensuring the Streamlit frontend remains a thin client focused on state rendering rather than business logic or raw API orchestration.
+
+| Component | Technology | Responsibility | Primary Dependency |
+| :--- | :--- | :--- | :--- |
+| **Presentation UI** | Streamlit | Session state, routing, grid rendering | FastAPI Backend |
+| **Orchestration API** | FastAPI | Route handling, Pydantic validation, TMDB proxy | TMDB API, Scipy/Numpy |
+| **Data Serialization** | Pickle | Loading precomputed TF-IDF matrices/mappings | Local Disk (`.pkl`) |
+| **External Metadata** | TMDB API | Poster URLs, movie overviews, genre discovery | HTTPS / REST |
+
+### Core Execution & Data Flow Mechanics
+
+The system utilizes a reactive data flow where user input triggers a chain of requests that may involve local vector space calculations and external HTTP calls.
+
+```mermaid
+sequenceDiagram
+    participant U["User"]
+    participant S["Streamlit UI"]
+    participant F["FastAPI Backend"]
+    participant L["Local TF-IDF Model"]
+    participant T["TMDB API"]
+
+    U->>S["Input Keyword"]
+    S->>F["GET /tmdb/search"]
+    F->>T["GET /search/movie"]
+    T-->>F["Raw Results"]
+    F-->>S["Parsed Cards"]
+    S-->>U["Display Grid"]
+    U->>S["Select Movie"]
+    S->>F["GET /movie/search (Bundle)"]
+    F->>T["GET /movie/{id}"]
+    F->>L["Cosine Similarity Search"]
+    F->>T["GET /discover/movie (Genre)"]
+    F-->>S["SearchBundleResponse"]
+    S-->>U["Render Details + Recs"]
+```
+
+**Key Flow Invariants:**
+*   **State Synchronization:** Streamlit synchronizes `st.session_state` with `st.query_params` to allow browser-level deep linking to specific movie IDs.
+*   **Aggregation Strategy:** The `/movie/search` endpoint acts as an aggregator, reducing frontend round-trips by bundling movie details, TF-IDF recommendations, and genre-based discovery into a single JSON payload.
+*   **Graceful Degradation:** If the local TF-IDF model fails to find a title match, the system falls back to TMDB genre-based discovery to ensure the user always receives recommendations.
+
+### Implementation Deep Dive
+
+#### 1. Aggregated Search Bundle Logic
+The `search_bundle` handler is the most critical endpoint in the delivery layer. It orchestrates the transition from a keyword query to a fully realized recommendation page.
+
+```python title="main.py"
+@app.get("/movie/search", response_model=SearchBundleResponse)
+async def search_bundle(
+    query: str = Query(..., min_length=1),
+    tfidf_top_n: int = Query(12, ge=1, le=30),
+    genre_limit: int = Query(12, ge=1, le=30),
+):
+    # 1. Resolve query to a specific TMDB entity
+    best = await tmdb_search_first(query)
+    if not best:
+        raise HTTPException(status_code=404, detail=f"No TMDB movie found for query: {query}")
+
+    tmdb_id = int(best["id"])
+    details = await tmdb_movie_details(tmdb_id)
+
+    # 2. Local TF-IDF Calculation
+    tfidf_items: List[TFIDFRecItem] = []
+    try:
+        recs = tfidf_recommend_titles(details.title, top_n=tfidf_top_n)
+    except Exception:
+        recs = [] # Fallback to empty list to prevent 500 error
+
+    for title, score in recs:
+        card = await attach_tmdb_card_by_title(title)
+        tfidf_items.append(TFIDFRecItem(title=title, score=score, tmdb=card))
+
+    # 3. TMDB Genre Discovery
+    genre_recs: List[TMDBMovieCard] = []
+    if details.genres:
+        genre_id = details.genres[0]["id"]
+        discover = await tmdb_get("/discover/movie", {"with_genres": genre_id, "sort_by": "popularity.desc"})
+        genre_recs = await tmdb_cards_from_results(discover.get("results", []), limit=genre_limit)
+
+    return SearchBundleResponse(
+        query=query,
+        movie_details=details,
+        tfidf_recommendations=tfidf_items,
+        genre_recommendations=genre_recs,
+    )
+```
+**Mechanics:**
+*   **`tmdb_search_first`**: Narrowly identifies the most likely movie target to establish a `tmdb_id`.
+*   **`tfidf_recommend_titles`**: Accesses the global `tfidf_matrix` and performs a dot product between the query movie's vector and the entire corpus.
+*   **`attach_tmdb_card_by_title`**: Resolves local dataset titles (which may lack IDs) back to TMDB IDs to fetch posters.
+
+#### 2. Dynamic Presentation Grid
+The frontend implements a flexible grid system to handle varying screen widths and result counts.
+
+```python title="app.py"
+def poster_grid(cards, cols=6, key_prefix="grid"):
+    if not cards:
+        st.info("No movies to show.")
+        return
+
+    rows = (len(cards) + cols - 1) // cols
+    idx = 0
+    for r in range(rows):
+        colset = st.columns(cols)
+        for c in range(cols):
+            if idx >= len(cards):
+                break
+            m = cards[idx]
+            idx += 1
+            
+            tmdb_id = m.get("tmdb_id")
+            with colset[c]:
+                if m.get("poster_url"):
+                    st.image(m["poster_url"], width="stretch")
+                if st.button("Open", key=f"{key_prefix}_{r}_{c}_{idx}_{tmdb_id}"):
+                    if tmdb_id:
+                        goto_details(tmdb_id)
+                st.markdown(f"<div class='movie-title'>{m.get('title')}</div>", unsafe_allow_html=True)
+```
+**Mechanics:**
+*   **Row-Major Rendering**: Calculates `rows` based on total cards and `cols` slider input, creating `st.columns` for each row.
+*   **Collision-Free Keys**: Uses a composite key (`key_prefix`, row, col, index, and `tmdb_id`) to prevent Streamlit `DuplicateWidgetID` exceptions during state reruns.
+*   **CSS Injection**: Applies custom `.movie-title` styles to truncate long titles and maintain grid alignment.
+
+### Method & State Reference
+
+#### API Route Contract
+
+| Endpoint | Method | Key Parameters | Response Model | Logic Source |
+| :--- | :--- | :--- | :--- | :--- |
+| `/home` | `GET` | `category`, `limit` | `List[TMDBMovieCard]` | TMDB Trending/Popular |
+| `/tmdb/search` | `GET` | `query`, `page` | `Dict` (Raw TMDB) | TMDB Search API |
+| `/movie/id/{id}` | `GET` | `tmdb_id` | `TMDBMovieDetails` | TMDB Details API |
+| `/movie/search` | `GET` | `query`, `tfidf_top_n` | `SearchBundleResponse` | Hybrid TF-IDF + TMDB |
+| `/recommend/genre`| `GET` | `tmdb_id`, `limit` | `List[TMDBMovieCard]` | TMDB Discover |
+
+#### Frontend State Schema
+
+| State Key | Type | Default | Purpose |
+| :--- | :--- | :--- | :--- |
+| `view` | `String` | `"home"` | Controls routing between `home` and `details` views. |
+| `selected_tmdb_id` | `Integer` | `None` | Tracks the currently active movie for the details view. |
+
+#### Error Recovery & Failure Modes
+
+| Failure Scenario | Detection | Mitigation Strategy |
+| :--- | :--- | :--- |
+| **TMDB API Down** | `httpx.RequestError` / `status_code != 200` | Return `HTTP 502 Bad Gateway` with detailed error message. |
+| **Title Missing in Local DF** | `KeyError` in `TITLE_TO_IDX` | Catch exception in `search_bundle`; omit TF-IDF recs and rely on Genre recs. |
+| **Invalid Query Params** | `ValueError` / `int()` cast failure | Try-except block in routing logic; revert to `goto_home()`. |
+| **Poster Missing** | `poster_url is None` | Render placeholder text `🖼️ No poster` in UI. |

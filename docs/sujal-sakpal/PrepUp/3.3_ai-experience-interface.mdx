@@ -1,0 +1,146 @@
+---
+title: "AI Experience Interface"
+description: "User-facing components for AI interaction, including avatars, question cards, and interview controls."
+sidebar_position: 3.3
+---
+# AI Experience Interface
+
+## System Role & Architectural Position
+
+The AI Experience Interface serves as the presentation layer for the AI Processing Pipeline. It is responsible for transforming low-level WebSocket events and AI inference states into high-fidelity visual feedback. This layer ensures a low-latency perceptual loop between the user and the AI Inference Engine, abstracting the complexity of the underlying audio streaming and LLM token generation.
+
+The interface operates as a consumer of the global interview state, reacting to state mutations triggered by the `WebSocket & Stream Orchestration` layer.
+
+### Interface Specification & Dependencies
+
+| Component | Primary Responsibility | Critical Dependencies | State Input | Output Action |
+| :--- | :--- | :--- | :--- | :--- |
+| `AIAvatar` | Visualizing AI cognitive state | `framer-motion`, `lucide-react` | `aiStatus` (speaking, listening, thinking) | Visual Animation Cues |
+| `InterviewControls` | Session lifecycle orchestration | `useInterviewStore`, `WebAudio API` | `isRecording`, `sessionStatus` | WebSocket Signal Dispatch |
+| `QuestionCard` | Prompt delivery & visibility | `Tailwind CSS`, `React Context` | `currentQuestion`, `isProcessing` | User Cognitive Focus |
+
+## Core Execution & Data Flow Mechanics
+
+The AI Experience Interface implements a reactive loop where the UI is a deterministic function of the AI's current operational state. The flow begins with a user action or an incoming WebSocket packet, which updates the client-side state store, subsequently triggering a re-render of the interface components.
+
+### Interaction Sequence Diagram
+
+```mermaid
+sequenceDiagram
+    participant U["User"]
+    participant IC["InterviewControls"]
+    participant WS["WebSocket Layer"]
+    participant AI["AI Engine"]
+    participant UI["Avatar/Card"]
+
+    U->>IC["Trigger Action"]
+    IC->>WS["Emit Event"]
+    WS->>AI["Process Request"]
+    AI-->>WS["Stream Response"]
+    WS-->>UI["Update State"]
+    UI->>U["Visual Feedback"]
+```
+
+### State Transition Pipeline
+
+1.  **Input Trigger**: The `InterviewControls` component dispatches a signal (e.g., `START_RECORDING`) via the WebSocket bridge.
+2.  **State Synchronization**: The `WebSocket & Stream Orchestration` layer receives a state update from the server (e.g., `AI_THINKING`).
+3.  **Component Reactivity**: 
+    *   `AIAvatar` switches its animation loop to the "Processing" state (e.g., pulsing glow).
+    *   `QuestionCard` triggers a transition to display the next prompt received in the JSON payload.
+4.  **Output Execution**: As the synthetic audio stream arrives, the `AIAvatar` transitions to the "Speaking" state, synchronized with the audio playback buffer.
+
+## Implementation Deep Dive & Code Snippets
+
+### AI Avatar State Mapping
+The `AIAvatar` component maps discrete AI states to specific CSS animations and SVG transforms to provide immediate non-verbal feedback to the user.
+
+```typescript title="frontend/src/components/interview/AIAvatar.tsx"
+interface AIAvatarProps {
+  status: 'idle' | 'listening' | 'thinking' | 'speaking';
+}
+
+export const AIAvatar: React.FC<AIAvatarProps> = ({ status }) => {
+  const animationMap = {
+    idle: 'animate-pulse-slow',
+    listening: 'animate-bounce-subtle',
+    thinking: 'animate-spin-slow',
+    speaking: 'animate-wave-active',
+  };
+
+  return (
+    <div className={`avatar-container ${animationMap[status]}`}>
+      <AvatarVisual state={status} />
+      <div className="status-indicator" />
+    </div>
+  );
+};
+```
+*   **`animationMap`**: A deterministic lookup table that maps the backend `status` enum to Tailwind-defined animation classes.
+*   **`AvatarVisual`**: A sub-component that handles the SVG path morphing based on the `status` prop.
+*   **Complexity**: $\mathcal{O}(1)$ lookup time for state-to-animation mapping.
+
+### Interview Lifecycle Controls
+`InterviewControls` manages the transition between session states, ensuring that audio hardware is locked and WebSocket signals are sequenced correctly.
+
+```typescript title="frontend/src/components/interview/InterviewControls.tsx"
+const useInterviewControls = () => {
+  const { state, dispatch } = useInterviewStore();
+
+  const handleToggleMic = async () => {
+    try {
+      const newMuteState = !state.isMuted;
+      await socket.emit('MIC_TOGGLE', { muted: newMuteState });
+      dispatch({ type: 'SET_MUTE', payload: newMuteState });
+    } catch (error) {
+      handleControlError(error);
+    }
+  };
+
+  return { handleToggleMic, state };
+};
+```
+*   **`handleToggleMic`**: An asynchronous handler that ensures the server-side state is synchronized before updating the local store.
+*   **`socket.emit`**: Directly interfaces with the `WebSocket & Stream Orchestration` layer to modify the audio capture pipeline.
+*   **`dispatch`**: Updates the global state to trigger UI changes across the `AIAvatar` and `InterviewControls` simultaneously.
+
+### Question Card Rendering Logic
+The `QuestionCard` component handles the asynchronous arrival of LLM-generated prompts, implementing a fade-in mechanism to reduce cognitive load during transitions.
+
+```typescript title="frontend/src/components/interview/QuestionCard.tsx"
+export const QuestionCard: React.FC<{ question: string | null }> = ({ question }) => {
+  if (!question) return <SkeletonCard />;
+
+  return (
+    <motion.div 
+      initial={{ opacity: 0, y: 20 }}
+      animate={{ opacity: 1, y: 0 }}
+      className="question-card-container"
+    >
+      <h3 className="text-lg font-semibold">{question}</h3>
+    </motion.div>
+  );
+};
+```
+*   **`motion.div`**: Utilizes `framer-motion` for hardware-accelerated transitions, ensuring the UI does not "snap" when the AI generates a new question.
+*   **`SkeletonCard`**: Prevents layout shift (CLS) while the AI is in the `thinking` state.
+
+## Method / State Reference & Error Recovery
+
+### AI Status State Machine
+
+| State | Trigger Event | Visual Representation | System Behavior |
+| :--- | :--- | :--- | :--- |
+| `IDLE` | Session Init / Silence | Static/Slow Pulse | Waiting for user input or system trigger. |
+| `LISTENING` | `USER_START_SPEAKING` | Waveform / Bounce | Audio buffer streaming to server. |
+| `THINKING` | `USER_STOP_SPEAKING` | Rotating Ring / Glow | LLM processing request; prompt generation. |
+| `SPEAKING` | `AI_START_RESPONSE` | Active Waveform | TTS stream playback; audio buffer consumption. |
+
+### Failure Modes & Recovery
+
+| Failure Mode | Detection Mechanism | Recovery Strategy |
+| :--- | :--- | :--- |
+| **WebSocket Timeout** | Heartbeat Miss ($\Delta t > 5s$) | Trigger `RECONNECTING` state; pause `AIAvatar` animation. |
+| **Audio Device Loss** | `ondevicechange` Event | Prompt user via `InterviewControls` to re-select input device. |
+| **Inference Latency** | `THINKING` state $> 10s$ | Transition `QuestionCard` to a "still thinking" placeholder to maintain UX. |
+| **State Desync** | Sequence ID mismatch | Force-refresh state from `/session/current` REST endpoint. |

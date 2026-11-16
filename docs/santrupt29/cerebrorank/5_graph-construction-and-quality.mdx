@@ -1,0 +1,59 @@
+---
+title: "Graph Construction and Quality"
+description: "Explaining the process of loading crawled CSVs into a directed graph, handling the Weakly Connected Component (WCC) and generating the quality report."
+sidebar_position: 5
+---
+
+# Graph Construction and Quality
+
+The graph construction phase transforms raw crawled data into a structured directed graph and associated sparse matrices. This process ensures the data is mathematically sound for ranking algorithms like PageRank and HITS.
+
+## Graph Building Process
+
+The graph is constructed via the `load_graph` function in [core/graph_builder.py](https://github.com/santrupt29/cerebrorank/blob/32f8ca14fe1a4de04497d11e942f9c7432d264d1/core/graph_builder.py). The pipeline follows these steps:
+
+1.  **Data Loading**: The system reads `edgelist.csv` and `nodes.csv` (paths defined in [config.yaml](https://github.com/santrupt29/cerebrorank/blob/32f8ca14fe1a4de04497d11e942f9c7432d264d1/config.yaml)).
+2.  **Initial Graph Creation**: A NetworkX `DiGraph` is instantiated. Nodes from `nodes.csv` are added first to preserve metadata, followed by edges from `edgelist.csv`.
+3.  **Self-Loop Removal**: Any edge where the source and target are the same is removed and logged.
+4.  **WCC Filtering**: Depending on the configuration, the graph is pruned to its Giant Weakly Connected Component (see below).
+5.  **Indexing**: To facilitate sparse matrix operations, nodes are sorted alphabetically by title and assigned a zero-indexed integer ID. This ensures reproducibility across different runs.
+6.  **Matrix Generation**: The graph is converted into two primary sparse matrices:
+    *   **Adjacency Matrix $A$**: $A[i, j] = 1$ if a directed edge exists from node $i$ to node $j$.
+    *   **Transition Matrix $M$**: $M[j, i] = 1/\text{outdeg}(i)$ if a directed edge exists from $i$ to $j$. This is a column-stochastic matrix used by PageRank.
+
+## Handling the Weakly Connected Component (WCC)
+
+To ensure the ranking results are meaningful and the transition matrix is well-behaved, the system can filter out isolated clusters.
+
+*   **Configuration**: This behavior is toggled by `keep_giant_wcc` in [config.yaml](https://github.com/santrupt29/cerebrorank/blob/32f8ca14fe1a4de04497d11e942f9c7432d264d1/config.yaml).
+*   **Mechanism**: When enabled, the system identifies all weakly connected components, selects the largest one (the "giant" component), and drops all nodes and edges belonging to smaller, disconnected components.
+
+## Data Quality Report
+
+After construction, the system generates a quality report to describe the resulting graph's topology. This report is triggered by the `build` command in [main.py](https://github.com/santrupt29/cerebrorank/blob/32f8ca14fe1a4de04497d11e942f9c7432d264d1/main.py) and saved to the path specified by `data_quality_path` in [config.yaml](https://github.com/santrupt29/cerebrorank/blob/32f8ca14fe1a4de04497d11e942f9c7432d264d1/config.yaml).
+
+The report includes:
+*   **Node and Edge Counts**: Total number of nodes and edges in the final graph.
+*   **Raw vs. Filtered Stats**: The number of nodes dropped during WCC filtering and the number of self-loops removed.
+*   **Dangling Node Analysis**: Identification of "dangling nodes" (nodes with an out-degree of 0). These are tracked via a `dangling_mask` to be handled during the PageRank iteration.
+
+## Summary of Data Structures
+
+The resulting `GraphData` container used throughout the ranking and validation stages consists of:
+
+| Symbol | Type | Description |
+| :--- | :--- | :--- |
+| `G` | `nx.DiGraph` | The filtered NetworkX graph. |
+| `A` | `sp.csr_matrix` | Adjacency matrix (row=source). |
+| `M` | `sp.csr_matrix` | Column-stochastic transition matrix (row=destination). |
+| `id_to_title` | `Dict[int, str]` | Mapping from integer index back to Wikipedia title. |
+| `title_to_id` | `Dict[str, int]` | Mapping from Wikipedia title to integer index. |
+| `dangling_mask` | `np.ndarray` | Boolean array where `True` indicates a node with no outgoing edges. |
+
+## Source snapshot
+
+Revision: `32f8ca14fe1a4de04497d11e942f9c7432d264d1`. Read 30 of 60 listed files. This guide does not claim exhaustive coverage.
+
+- [core/graph_builder.py](https://github.com/santrupt29/cerebrorank/blob/32f8ca14fe1a4de04497d11e942f9c7432d264d1/core/graph_builder.py)
+- [main.py](https://github.com/santrupt29/cerebrorank/blob/32f8ca14fe1a4de04497d11e942f9c7432d264d1/main.py)
+- [config.yaml](https://github.com/santrupt29/cerebrorank/blob/32f8ca14fe1a4de04497d11e942f9c7432d264d1/config.yaml)

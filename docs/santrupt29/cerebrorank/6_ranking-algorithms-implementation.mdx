@@ -1,0 +1,73 @@
+---
+title: "Ranking Algorithms Implementation"
+description: "Technical details on the scratch implementation of PageRank and HITS (Hubs and Authorities) using scipy.sparse matrices and numpy."
+sidebar_position: 6
+---
+
+# Ranking Algorithms Implementation
+
+This document provides technical details regarding the custom implementations of the PageRank and HITS (Hubs and Authorities) algorithms within the `cerebrorank` project. To ensure algorithmic integrity, these implementations are written from scratch using `numpy` and `scipy.sparse` and are strictly prohibited from importing built-in ranking functions from NetworkX within the core logic [core/algorithms.py](https://github.com/santrupt29/cerebrorank/blob/32f8ca14fe1a4de04497d11e942f9c7432d264d1/core/algorithms.py).
+
+## PageRank
+
+The PageRank implementation uses the power iteration method on a column-stochastic transition matrix $M$ to find the stationary distribution of the link graph.
+
+### Mathematical Formulation
+The algorithm follows the formula:
+$$PR_{t+1} = d \cdot (M @ PR_t + \text{dangling\_sum}_t \cdot p) + (1 - d) \cdot p$$
+
+Where:
+*   $d$: The damping factor (default $0.85$ as defined in [config.yaml](https://github.com/santrupt29/cerebrorank/blob/32f8ca14fe1a4de04497d11e942f9c7432d264d1/config.yaml)).
+*   $\text{dangling\_sum}_t$: The sum of PageRank scores for all "dangling nodes" (nodes with an out-degree of 0) at iteration $t$.
+*   $p$: The personalization vector. If not provided, it defaults to a uniform distribution ($1/N$).
+*   $M$: A column-stochastic CSR matrix where $M[j,i] = 1/\text{outdeg}(i)$ if an edge exists from $i \to j$.
+
+### Implementation Details
+*   **Dangling Node Correction:** To prevent "rank sink" where probability mass is lost at nodes with no outgoing edges, the implementation redistributes the mass of dangling nodes according to the personalization vector $p$.
+*   **Personalization:** Both the teleportation term and the dangling node redistribution follow the vector $p$. This ensures that even when a random surfer hits a dangling node, their next jump respects the personalization preferences [core/algorithms.py](https://github.com/santrupt29/cerebrorank/blob/32f8ca14fe1a4de04497d11e942f9c7432d264d1/core/algorithms.py).
+*   **Convergence:** The iteration stops when the $L_1$ norm of the difference between successive iterations falls below the threshold $\text{tol}$ (default $1.0e-6$ from [config.yaml](https://github.com/santrupt29/cerebrorank/blob/32f8ca14fe1a4de04497d11e942f9c7432d264d1/config.yaml)).
+*   **Result Structure:** Returns a `PageRankResult` dataclass containing:
+    *   `scores`: The final probability vector (sums to 1).
+    *   `residuals`: A history of the $L_1$ error per iteration.
+    *   `iterations`: The total iterations performed.
+
+## HITS (Hubs and Authorities)
+
+The HITS implementation follows Kleinberg's algorithm, which identifies two types of important nodes: **Authorities** (nodes pointed to by many hubs) and **Hubs** (nodes that point to many authorities).
+
+### Algorithm Process
+Given an adjacency matrix $A$ where $A[i,j]=1$ if an edge $i \to j$ exists:
+1.  **Initialization:** The hub vector $h_0$ is initialized as an $L_2$-normalized vector ($1_N / \sqrt{N}$).
+2.  **Iterative Update:**
+    *   **Authority Update:** $a_{t+1} = A^T h_t$, followed by $L_2$-normalization.
+    *   **Hub Update:** $h_{t+1} = A a_{t+1}$, followed by $L_2$-normalization.
+3.  **Convergence:** The loop terminates when $\max(\| \Delta a \|_1, \| \Delta h \|_1) < \text{tol}$.
+
+### Implementation Details
+*   **Normalization:** Unlike some implementations that normalize scores to sum to 1, this scratch version uses $L_2$-normalization for the vectors during the iterative process [core/algorithms.py](https://github.com/santrupt29/cerebrorank/blob/32f8ca14fe1a4de04497d11e942f9c7432d264d1/core/algorithms.py).
+*   **Result Structure:** Returns a `HITSResult` dataclass containing:
+    *   `authority`: The $L_2$-normalized authority scores.
+    *   `hub`: The $L_2$-normalized hub scores.
+    *   `convergence`: A list of tuples tracking the evolution of errors ($L_1$ deltas and cosine distances).
+
+## Validation Strategy
+
+To ensure the scratch implementations are mathematically sound, they are validated against the industry-standard `NetworkX` library within `core/validation.py`.
+
+### Comparison Metrics
+The system calculates the following metrics to compare the custom output against `NetworkX`:
+*   **Mean Squared Error (MSE):** Measures the average squared difference between score vectors.
+*   **Spearman's Rho ($\rho$):** Measures the rank correlation between the custom scores and `NetworkX` scores.
+*   **Kendall's Tau ($\tau$):** Measures the ordinal association between the two rankings.
+*   **Top-10 Overlap:** The size of the intersection between the set of the top 10 nodes in the custom implementation and the top 10 nodes in `NetworkX`.
+
+### Normalization for Comparison
+Because the custom HITS implementation uses $L_2$-normalization and `NetworkX` HITS uses a sum-to-1 normalization, `core/validation.py` performs a renormalization step (`_renorm`) on the custom vectors before computing error metrics. This ensures the comparison focuses on the **distribution shape** rather than the scaling convention.
+
+## Source snapshot
+
+Revision: `32f8ca14fe1a4de04497d11e942f9c7432d264d1`. Read 30 of 60 listed files. This guide does not claim exhaustive coverage.
+
+- [core/algorithms.py](https://github.com/santrupt29/cerebrorank/blob/32f8ca14fe1a4de04497d11e942f9c7432d264d1/core/algorithms.py)
+- [core/validation.py](https://github.com/santrupt29/cerebrorank/blob/32f8ca14fe1a4de04497d11e942f9c7432d264d1/core/validation.py)
+- [config.yaml](https://github.com/santrupt29/cerebrorank/blob/32f8ca14fe1a4de04497d11e942f9c7432d264d1/config.yaml)

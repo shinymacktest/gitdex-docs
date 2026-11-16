@@ -1,0 +1,57 @@
+---
+title: "Wikipedia Crawling Pipeline"
+description: "Documentation of the ethical crawler's hybrid BFS approach, including rate-limiting, domain filtering (dropped_namespaces), and content cleaning (removed_selectors)."
+sidebar_position: 4
+---
+
+# Wikipedia Crawling Pipeline
+
+The Wikipedia crawling pipeline implements an ethical, hybrid Breadth-First Search (BFS) approach to extract a focused subgraph of the Marvel universe. The system combines API-driven membership discovery with HTML scraping to ensure the resulting graph remains relevant to the project's scope while adhering to web standards.
+
+## Crawl Strategy
+
+The crawler operates in three distinct phases to balance discovery and precision:
+
+1.  **Phase 1: Allowed-Set Expansion**: The crawler queries the MediaWiki `categorymembers` API starting from the `category_roots` defined in [config.yaml](https://github.com/santrupt29/cerebrorank/blob/32f8ca14fe1a4de04497d11e942f9c7432d264d1/config.yaml). It explores subcategories up to the specified `category_depth` to build an "allowed-set" of article titles.
+2.  **Phase 2: Hybrid BFS**: 
+    *   The process begins with `seeds` enqueued first, followed by the allowed-set titles.
+    *   A page is accepted into the graph if it is already in the allowed-set OR if a live API check confirms it belongs to an allowed category.
+    *   The crawl terminates when it reaches `max_depth` hops or the `max_nodes` limit.
+3.  **Phase 3: Edge Recording**: Edges are deferred until the BFS is complete. An edge $u \to v$ is recorded only if both the source and destination nodes were successfully fetched and validated.
+
+## Ethical Controls and Rate-Limiting
+
+To ensure the crawler is a "good citizen" of the web, [crawler/wiki_crawler.py](https://github.com/santrupt29/cerebrorank/blob/32f8ca14fe1a4de04497d11e942f9c7432d264d1/crawler/wiki_crawler.py) implements several safeguards:
+
+*   **Robots.txt Compliance**: The `robots.txt` file is fetched and cached. The `_can_fetch()` method is called before every HTML request to ensure compliance with Wikipedia's crawling policies.
+*   **Identity**: A descriptive `user_agent` is sent with every request, as configured in [config.yaml](https://github.com/santrupt29/cerebrorank/blob/32f8ca14fe1a4de04497d11e942f9c7432d264d1/config.yaml).
+*   **Politeness**:
+    *   **Randomized Delay**: The crawler sleeps for a random duration between `delay_min` and `delay_max` between requests.
+    *   **Exponential Back-off**: On HTTP 429 (Too Many Requests) or 503 (Service Unavailable), the crawler honors the `Retry-After` header or applies a back-off multiplier based on `backoff_base`.
+*   **Caching**: All responses are cached in `data/cache/` using content hashes of parameters. Re-running the crawler against cached data results in zero new network requests.
+
+## Content Filtering and Cleaning
+
+To prevent "noise" from distorting the PageRank and HITS results, the pipeline aggressively filters content:
+
+### Domain and Namespace Filtering
+The crawler ignores links belonging to specific Wikipedia namespaces to ensure only content articles are indexed. As defined in [config.yaml](https://github.com/santrupt29/cerebrorank/blob/32f8ca14fe1a4de04497d11e942f9c7432d264d1/config.yaml), `dropped_namespaces` include:
+*   `Help:`, `File:`, `Special:`, `Talk:`, `Wikipedia:`, `Portal:`, `Template:`, `User:`, `MediaWiki:`, `Module:`, `Draft:`, and `Category:`.
+
+### Structural Cleaning
+Navigational elements often create artificial "hubs" that do not represent actual entity influence. The crawler removes specific CSS selectors before extracting links:
+*   **Removed Selectors**: `.navbox`, `.vertical-navbox`, `.sidebar`, `.reflist`, `.references`, `.hatnote`, and `.toc` (among others).
+*   **Section Dropping**: All content following specific headings (e.g., "References", "External links", "See also") is discarded.
+
+## State Management and Recovery
+
+To prevent data loss during long crawls, the system implements a resumable state mechanism:
+*   **State Persistence**: The current progress is flushed to `_crawl_state.json` every 10 nodes (defined by `_STATE_SAVE_INTERVAL` in [crawler/wiki_crawler.py](https://github.com/santrupt29/cerebrorank/blob/32f8ca14fe1a4de04497d11e942f9c7432d264d1/crawler/wiki_crawler.py)).
+*   **Recovery**: Upon initialization, the `WikiCrawler` checks for an existing state file to resume the BFS from the last saved node.
+
+## Source snapshot
+
+Revision: `32f8ca14fe1a4de04497d11e942f9c7432d264d1`. Read 30 of 60 listed files. This guide does not claim exhaustive coverage.
+
+- [crawler/wiki_crawler.py](https://github.com/santrupt29/cerebrorank/blob/32f8ca14fe1a4de04497d11e942f9c7432d264d1/crawler/wiki_crawler.py)
+- [config.yaml](https://github.com/santrupt29/cerebrorank/blob/32f8ca14fe1a4de04497d11e942f9c7432d264d1/config.yaml)
